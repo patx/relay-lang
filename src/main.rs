@@ -1426,6 +1426,7 @@ Stmt::Expr(e) => {
                 // IMPORTANT: spawn(expr) must receive raw (unresolved) values so it can run them concurrently
                 let is_spawn_ident = matches!(&**callee, Expr::Ident(name) if name == "spawn");
                 let is_sleep_ident = matches!(&**callee, Expr::Ident(name) if name == "sleep");
+                let is_print_ident = matches!(&**callee, Expr::Ident(name) if name == "print");
 
                 let c = self.resolve_deferred_only(self.eval_expr(callee).await?).await?;
 
@@ -1433,8 +1434,8 @@ Stmt::Expr(e) => {
 // args
 let mut a = Vec::new();
 for (idx, x) in args.iter().enumerate() {
-    if is_sleep_ident && idx == 1 {
-        // Pass unevaluated expression as a thunk (evaluated after delay)
+    if (is_sleep_ident && idx == 1) || is_print_ident {
+        // Pass unevaluated expression as a thunk (evaluated after delay or in print)
         a.push(Value::Thunk(Arc::new(Thunk::new(x.clone(), self.env.clone()))));
         continue;
     }
@@ -1733,8 +1734,32 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
         "print",
         Value::Builtin(Arc::new(|args, _| {
             Box::pin(async move {
-                println!("{}", args.into_iter().map(|v| v.repr()).collect::<Vec<_>>().join(" "));
-                Ok(Value::None)
+                let needs_async = args.iter().any(|v| matches!(v, Value::Thunk(_) | Value::Deferred(_) | Value::Task(_)));
+                if needs_async {
+                    let d = Deferred::new(Box::pin(async move {
+                        let mut out = Vec::new();
+                        for v in args {
+                            let mut resolved = match v {
+                                Value::Thunk(t) => t.run().await?,
+                                Value::Deferred(d) => d.resolve().await?,
+                                Value::Task(t) => t.join().await?,
+                                v => v,
+                            };
+                            resolved = match resolved {
+                                Value::Deferred(d) => d.resolve().await?,
+                                Value::Task(t) => t.join().await?,
+                                v => v,
+                            };
+                            out.push(resolved);
+                        }
+                        println!("{}", out.iter().map(|v| v.repr()).collect::<Vec<_>>().join(" "));
+                        Ok(Value::None)
+                    }));
+                    Ok(Value::Deferred(Arc::new(d)))
+                } else {
+                    println!("{}", args.iter().map(|v| v.repr()).collect::<Vec<_>>().join(" "));
+                    Ok(Value::None)
+                }
             })
         })),
     );
@@ -2582,4 +2607,3 @@ async fn main() -> anyhow::Result<()> {
     }
     Ok(())
 }
-
