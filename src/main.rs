@@ -1427,6 +1427,7 @@ Stmt::Expr(e) => {
                 let is_spawn_ident = matches!(&**callee, Expr::Ident(name) if name == "spawn");
                 let is_sleep_ident = matches!(&**callee, Expr::Ident(name) if name == "sleep");
                 let is_print_ident = matches!(&**callee, Expr::Ident(name) if name == "print");
+                let is_printnow_ident = matches!(&**callee, Expr::Ident(name) if name == "printnow");
 
                 let c = self.resolve_deferred_only(self.eval_expr(callee).await?).await?;
 
@@ -1440,7 +1441,13 @@ for (idx, x) in args.iter().enumerate() {
         continue;
     }
     let v = self.eval_expr(x).await?;
-    let v = if is_spawn_ident { v } else { self.resolve_deferred_only(v).await? };
+    let v = if is_spawn_ident {
+        v
+    } else if is_printnow_ident {
+        self.resolve_if_needed(v).await?
+    } else {
+        self.resolve_deferred_only(v).await?
+    };
     a.push(v);
 }
 
@@ -1760,6 +1767,32 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
                     println!("{}", args.iter().map(|v| v.repr()).collect::<Vec<_>>().join(" "));
                     Ok(Value::None)
                 }
+            })
+        })),
+    );
+
+    // printnow(...)
+    env.set(
+        "printnow",
+        Value::Builtin(Arc::new(|args, _| {
+            Box::pin(async move {
+                let mut out = Vec::new();
+                for v in args {
+                    let mut resolved = match v {
+                        Value::Thunk(t) => t.run().await?,
+                        Value::Deferred(d) => d.resolve().await?,
+                        Value::Task(t) => t.join().await?,
+                        v => v,
+                    };
+                    resolved = match resolved {
+                        Value::Deferred(d) => d.resolve().await?,
+                        Value::Task(t) => t.join().await?,
+                        v => v,
+                    };
+                    out.push(resolved);
+                }
+                println!("{}", out.iter().map(|v| v.repr()).collect::<Vec<_>>().join(" "));
+                Ok(Value::None)
             })
         })),
     );
