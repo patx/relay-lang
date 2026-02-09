@@ -1,0 +1,11 @@
+app = WebApp()
+
+@app.get("/")
+fn index()
+    return "Hello world"
+
+@app.get("/<name>")
+fn hello(name)
+    return "Hello {{ name }}"
+
+WebServer.run(app)
