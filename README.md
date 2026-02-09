@@ -246,6 +246,22 @@ print(json["json"]["hello"])
 
 ---
 
+## MongoDB client
+
+```relay
+mongo = Mongo("mongodb://localhost:27017")
+db = mongo.db("relay_demo")
+users = db.collection("users")
+
+users.insert_one({"name": "Ada", "active": True})
+user = users.find_one({"name": "Ada"})
+print(user)
+```
+
+MongoDB helpers return `Deferred` values, so they run asynchronously until the result is needed.
+
+---
+
 ## Web server
 
 ```relay
@@ -354,6 +370,8 @@ server.run(app)
 **Files + JSON**: `read_file`, `save_file`, `read_json`, `save_json`
 
 **Web**: `WebApp`, `WebServer`, `Response`, `Http`
+
+**Database**: `Mongo`
 
 ---
 
