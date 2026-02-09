@@ -45,6 +45,25 @@ If you're iterating on the compiler, you can still run it directly:
 cargo run -- path/to/file.ry
 ```
 
+### Project layout
+
+Relay is currently a single-file interpreter:
+
+- `src/main.rs` implements the lexer, parser, evaluator, stdlib, and runtime.
+- `examples/` can hold `.ry` samples (see below).
+
+### CLI usage
+
+```bash
+relay path/to/app.ry
+```
+
+If you run a web server, you can override the bind address:
+
+```bash
+RELAY_BIND=0.0.0.0:8080 relay path/to/server.ry
+```
+
 Hello world with non-blocking order:
 
 ```relay
@@ -62,6 +81,16 @@ world
 ---
 
 ## Language tour
+
+### Program structure
+
+Relay is indentation-based (4 spaces per level) and uses expression statements:
+
+```relay
+fn main()
+    print("hello")
+    print("world")
+```
 
 ### Values, collections, and operators
 
@@ -111,6 +140,25 @@ print(greet("relay"))
 
 Type hints are enforced at runtime for `str`, `int`, `float`, and `json`/`Json`.
 
+### Dictionaries and JSON
+
+Relay dicts use stringified keys and can be serialized as JSON:
+
+```relay
+profile = {"name": "Ada", "lang": "Relay"}
+save_json(profile, "profile.json")
+loaded = read_json("profile.json")
+print(loaded["name"])
+```
+
+### Error handling
+
+Relay surfaces runtime errors with a message and location for syntax issues. Some examples:
+
+- Type errors: invalid operators on mismatched types.
+- Name errors: use of undefined variables.
+- Runtime errors: invalid IO or HTTP failures.
+
 ---
 
 ## Async model (no `await`)
@@ -146,6 +194,22 @@ Other concurrency helpers:
 - `race([..])`
 - `cancel(task)`
 - `task.join()` and `deferred.resolve()`
+
+### Tasks vs Deferred values
+
+- `sleep`, IO, and HTTP calls return `Deferred` values.
+- `spawn(expr)` returns a `Task`, which can be `join()`-ed.
+- Expression statements run without blocking: any returned `Deferred` or `Task` keeps running.
+
+### Built-ins and type coercion
+
+Relay provides lightweight coercions via built-ins:
+
+```relay
+print(str(123))
+print(int("42"))
+print(float(3))
+```
 
 ---
 
@@ -214,6 +278,70 @@ fn status()
 ```
 
 Relay will infer `content_type` when possible; use `Response(...)` to force status codes or headers.
+
+---
+
+## Example apps
+
+### 1) Basic JSON API
+
+```relay
+app = WebApp()
+server = WebServer()
+
+@app.get("/health")
+fn health()
+    return {"ok": True, "service": "relay"}
+
+server.run(app)
+```
+
+### 2) Echo service with path params and query
+
+```relay
+app = WebApp()
+server = WebServer()
+
+@app.get("/echo/<name>")
+fn echo(name, greeting: str = "hello")
+    return greeting + " " + name
+
+server.run(app)
+```
+
+### 3) Background work with concurrency
+
+```relay
+fn work(n)
+    sleep(500, n * 2)
+
+jobs = [spawn(work(2)), spawn(work(5)), spawn(work(7))]
+result = all(jobs)
+print(result)
+```
+
+### 4) HTTP client + JSON processing
+
+```relay
+http = Http()
+resp = http.get("https://httpbin.org/json")
+data = resp.json()
+print(data["slideshow"])
+```
+
+### 5) Static HTML response with templating
+
+```relay
+app = WebApp()
+server = WebServer()
+title = "Relay"
+
+@app.get("/")
+fn index()
+    return "<h1>{{ title }}</h1>"
+
+server.run(app)
+```
 
 ---
 
