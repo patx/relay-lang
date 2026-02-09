@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Relay - Networking-first, async-by-default</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            color: #1a1a1a;
+            background: #ffffff;
+        }
+
+        .hero {
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 2rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url('data:image/svg+xml,<svg width="60" height="60" xmlns="http://www.w3.org/2000/svg"><path d="M0 0h60v60H0z" fill="none"/><path d="M30 0v60M0 30h60" stroke="rgba(255,255,255,0.05)" stroke-width="1"/></svg>');
+            opacity: 0.3;
+        }
+
+        .hero-content {
+            max-width: 900px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .logo {
+            font-size: 5rem;
+            font-weight: 800;
+            margin-bottom: 1rem;
+            letter-spacing: -0.02em;
+        }
+
+        .tagline {
+            font-size: 1.8rem;
+            margin-bottom: 1.5rem;
+            font-weight: 300;
+            opacity: 0.95;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            margin-bottom: 3rem;
+            opacity: 0.85;
+            font-weight: 400;
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 1rem 2.5rem;
+            font-size: 1.1rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: transform 0.2s, box-shadow 0.2s;
+            font-weight: 600;
+        }
+
+        .btn-primary {
+            background: white;
+            color: #667eea;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.15);
+            color: white;
+            border: 2px solid white;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+        }
+
+        .section {
+            padding: 5rem 2rem;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .section-title {
+            font-size: 2.5rem;
+            margin-bottom: 3rem;
+            text-align: center;
+            font-weight: 700;
+            color: #2d3748;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 2rem;
+            margin-top: 3rem;
+        }
+
+        .feature-card {
+            background: #f7fafc;
+            padding: 2rem;
+            border-radius: 12px;
+            border-left: 4px solid #667eea;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        .feature-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .feature-title {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #2d3748;
+        }
+
+        .feature-desc {
+            color: #4a5568;
+            line-height: 1.7;
+        }
+
+        .code-example {
+            background: #1a202c;
+            color: #e2e8f0;
+            padding: 2rem;
+            border-radius: 12px;
+            overflow-x: auto;
+            margin: 2rem 0;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+
+        .code-example pre {
+            margin: 0;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.95rem;
+            line-height: 1.6;
+        }
+
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid rgba(226, 232, 240, 0.1);
+        }
+
+        .code-title {
+            font-weight: 600;
+            color: #a0aec0;
+            font-size: 0.9rem;
+        }
+
+        .code-label {
+            background: #667eea;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .keyword { color: #c792ea; }
+        .function { color: #82aaff; }
+        .string { color: #c3e88d; }
+        .number { color: #f78c6c; }
+        .comment { color: #546e7a; font-style: italic; }
+
+        .comparison {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+            padding: 5rem 2rem;
+        }
+
+        .comparison .section-title {
+            color: white;
+        }
+
+        .compare-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-top: 3rem;
+        }
+
+        .compare-card {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 2rem;
+            border-radius: 12px;
+            color: #2d3748;
+        }
+
+        .compare-lang {
+            font-size: 1.2rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            color: #667eea;
+        }
+
+        .install {
+            background: #2d3748;
+            color: white;
+            padding: 5rem 2rem;
+        }
+
+        .install .section-title {
+            color: white;
+        }
+
+        .install-steps {
+            max-width: 700px;
+            margin: 3rem auto;
+        }
+
+        .install-step {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            border-left: 4px solid #667eea;
+        }
+
+        .step-number {
+            display: inline-block;
+            background: #667eea;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            text-align: center;
+            line-height: 30px;
+            font-weight: 700;
+            margin-right: 1rem;
+        }
+
+        .install-cmd {
+            background: #1a202c;
+            padding: 1rem;
+            border-radius: 6px;
+            margin-top: 1rem;
+            font-family: monospace;
+            overflow-x: auto;
+        }
+
+        footer {
+            background: #1a202c;
+            color: #a0aec0;
+            text-align: center;
+            padding: 2rem;
+        }
+
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .footer-links a {
+            color: #a0aec0;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        .footer-links a:hover {
+            color: #667eea;
+        }
+
+        @media (max-width: 768px) {
+            .logo {
+                font-size: 3rem;
+            }
+
+            .tagline {
+                font-size: 1.3rem;
+            }
+
+            .subtitle {
+                font-size: 1rem;
+            }
+
+            .section {
+                padding: 3rem 1rem;
+            }
+
+            .code-example {
+                padding: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <section class="hero">
+        <div class="hero-content">
+            <div class="logo">Relay</div>
+            <div class="tagline">Networking-first, async-by-default</div>
+            <div class="subtitle">
+                Everything is async, but nothing waits unless it has to.
+            </div>
+            <div class="cta-buttons">
+                <a href="#install" class="btn btn-primary">Get Started</a>
+                <a href="#features" class="btn btn-secondary">Learn More</a>
+            </div>
+        </div>
+    </section>
+
+    <section class="section" id="features">
+        <h2 class="section-title">Why Relay?</h2>
+        
+        <div class="code-example">
+            <div class="code-header">
+                <span class="code-title">No await keyword needed</span>
+                <span class="code-label">Relay v0.1</span>
+            </div>
+            <pre><span class="keyword">fn</span> <span class="function">main</span>()
+    x = <span class="function">sleep</span>(<span class="number">1000</span>, <span class="number">10</span>)
+    y = <span class="function">sleep</span>(<span class="number">1000</span>, <span class="number">20</span>)
+    <span class="function">print</span>(x + y)  <span class="comment"># Automatically waits when values are needed</span></pre>
+        </div>
+
+        <div class="features">
+            <div class="feature-card">
+                <div class="feature-icon">⚡</div>
+                <h3 class="feature-title">Implicit Async</h3>
+                <p class="feature-desc">No await keyword. Async values resolve automatically when you need them. Write synchronous-looking code that runs asynchronously.</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🌐</div>
+                <h3 class="feature-title">Built for Networking</h3>
+                <p class="feature-desc">HTTP client and web server built into the standard library. Create APIs and services with minimal boilerplate.</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🎯</div>
+                <h3 class="feature-title">Simple Syntax</h3>
+                <p class="feature-desc">Python-like syntax with indentation-based blocks. Easy to read, easy to write, easy to maintain.</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🚀</div>
+                <h3 class="feature-title">Non-blocking I/O</h3>
+                <p class="feature-desc">All I/O operations are non-blocking by default. Node.js-style runtime behavior with better ergonomics.</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🔧</div>
+                <h3 class="feature-title">Concurrency Primitives</h3>
+                <p class="feature-desc">Built-in spawn, all, race, timeout, and cancel. Powerful concurrency without the complexity.</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">📦</div>
+                <h3 class="feature-title">Batteries Included</h3>
+                <p class="feature-desc">File I/O, JSON processing, HTTP client/server, and async primitives all in the standard library.</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🎨</div>
+                <h3 class="feature-title">Template Rendering</h3>
+                <p class="feature-desc">Built-in template strings with {{ variable }} syntax. Return HTML from handlers with automatic variable interpolation.</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">🔍</div>
+                <h3 class="feature-title">Smart Type Coercion</h3>
+                <p class="feature-desc">Optional type hints (str, int, float, Json) with automatic runtime validation and coercion in function parameters.</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="feature-icon">⚙️</div>
+                <h3 class="feature-title">Decorator Syntax</h3>
+                <p class="feature-desc">Python-style decorators for web routing. Use @app.get("/path") or @route.post("/api") to define endpoints declaratively.</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="comparison">
+        <div class="section">
+            <h2 class="section-title">How Relay Compares</h2>
+            
+            <div class="compare-grid">
+                <div class="compare-card">
+                    <div class="compare-lang">JavaScript/TypeScript</div>
+                    <div class="code-example">
+                        <pre><span class="keyword">const</span> x = <span class="keyword">await</span> <span class="function">sleep</span>(<span class="number">1000</span>, <span class="number">10</span>);
+<span class="keyword">const</span> y = <span class="keyword">await</span> <span class="function">sleep</span>(<span class="number">1000</span>, <span class="number">20</span>);
+console.<span class="function">log</span>(x + y);</pre>
+                    </div>
+                    <p style="margin-top: 1rem; color: #4a5568;">Sequential execution, must remember await</p>
+                </div>
+
+                <div class="compare-card">
+                    <div class="compare-lang">Python (asyncio)</div>
+                    <div class="code-example">
+                        <pre>x = <span class="keyword">await</span> <span class="function">sleep</span>(<span class="number">1</span>, <span class="number">10</span>)
+y = <span class="keyword">await</span> <span class="function">sleep</span>(<span class="number">1</span>, <span class="number">20</span>)
+<span class="function">print</span>(x + y)</pre>
+                    </div>
+                    <p style="margin-top: 1rem; color: #4a5568;">Requires async/await keywords everywhere</p>
+                </div>
+
+                <div class="compare-card">
+                    <div class="compare-lang">Relay</div>
+                    <div class="code-example">
+                        <pre>x = <span class="function">sleep</span>(<span class="number">1000</span>, <span class="number">10</span>)
+y = <span class="function">sleep</span>(<span class="number">1000</span>, <span class="number">20</span>)
+<span class="function">print</span>(x + y)</pre>
+                    </div>
+                    <p style="margin-top: 1rem; color: #4a5568;">Concurrent execution, no await needed</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section">
+        <h2 class="section-title">Quick Examples</h2>
+
+        <div class="code-example">
+            <div class="code-header">
+                <span class="code-title">Web server with routing</span>
+                <span class="code-label">server.ry</span>
+            </div>
+            <pre>app = <span class="function">WebApp</span>()
+server = <span class="function">WebServer</span>()
+
+<span class="keyword">@app.get</span>(<span class="string">"/"</span>)
+<span class="keyword">fn</span> <span class="function">index</span>()
+    <span class="keyword">return</span> <span class="string">"Hello world"</span>
+
+<span class="keyword">@app.get</span>(<span class="string">"/hello/&lt;name&gt;"</span>)
+<span class="keyword">fn</span> <span class="function">hello</span>(name)
+    <span class="keyword">return</span> <span class="string">"Hello {{ name }}"</span>
+
+server.<span class="function">run</span>(app)</pre>
+        </div>
+
+        <div class="code-example">
+            <div class="code-header">
+                <span class="code-title">Concurrent tasks</span>
+                <span class="code-label">concurrent.ry</span>
+            </div>
+            <pre><span class="keyword">fn</span> <span class="function">work</span>(n)
+    <span class="function">sleep</span>(<span class="number">500</span>, n * <span class="number">2</span>)
+
+jobs = [<span class="function">spawn</span>(<span class="function">work</span>(<span class="number">2</span>)), <span class="function">spawn</span>(<span class="function">work</span>(<span class="number">5</span>)), <span class="function">spawn</span>(<span class="function">work</span>(<span class="number">7</span>))]
+results = <span class="function">all</span>(jobs)
+<span class="function">print</span>(results)  <span class="comment"># [4, 10, 14]</span></pre>
+        </div>
+
+        <div class="code-example">
+            <div class="code-header">
+                <span class="code-title">HTTP client & JSON</span>
+                <span class="code-label">http-client.ry</span>
+            </div>
+            <pre>http = <span class="function">Http</span>()
+resp = http.<span class="function">get</span>(<span class="string">"https://api.example.com/data"</span>)
+data = resp.<span class="function">json</span>()
+<span class="function">print</span>(data[<span class="string">"results"</span>])</pre>
+        </div>
+
+        <div class="code-example">
+            <div class="code-header">
+                <span class="code-title">JSON API with type hints</span>
+                <span class="code-label">api.ry</span>
+            </div>
+            <pre>app = <span class="function">WebApp</span>()
+server = <span class="function">WebServer</span>()
+
+<span class="keyword">@app.post</span>(<span class="string">"/users"</span>)
+<span class="keyword">fn</span> <span class="function">create_user</span>(data: Json)
+    <span class="keyword">return</span> {<span class="string">"id"</span>: <span class="number">123</span>, <span class="string">"name"</span>: data[<span class="string">"name"</span>]}
+
+server.<span class="function">run</span>(app)</pre>
+        </div>
+
+        <div class="code-example">
+            <div class="code-header">
+                <span class="code-title">Augmented assignment</span>
+                <span class="code-label">counters.ry</span>
+            </div>
+            <pre>count = <span class="number">0</span>
+count =+ <span class="number">5</span>  <span class="comment"># count is now 5</span>
+count =- <span class="number">2</span>  <span class="comment"># count is now 3</span>
+<span class="function">print</span>(count)</pre>
+        </div>
+    </section>
+
+    <section class="section" style="background: #f7fafc; padding: 5rem 2rem;">
+        <div style="max-width: 1200px; margin: 0 auto;">
+            <h2 class="section-title">Under the Hood</h2>
+            
+            <div class="features" style="margin-top: 2rem;">
+                <div class="feature-card" style="background: white;">
+                    <h3 class="feature-title">🦀 Built with Rust</h3>
+                    <p class="feature-desc">Single-file interpreter with AST-based evaluation. Uses Tokio for async runtime, ensuring robust concurrency.</p>
+                </div>
+
+                <div class="feature-card" style="background: white;">
+                    <h3 class="feature-title">🌐 Axum-powered Web Server</h3>
+                    <p class="feature-desc">Web server built on Axum framework with automatic JSON responses, path parameters, query strings, and request body handling.</p>
+                </div>
+
+                <div class="feature-card" style="background: white;">
+                    <h3 class="feature-title">⚡ Deferred Values</h3>
+                    <p class="feature-desc">Implicit async through Value::Deferred. Operations return immediately; resolution happens automatically when values are needed.</p>
+                </div>
+
+                <div class="feature-card" style="background: white;">
+                    <h3 class="feature-title">📝 Indentation-based Parser</h3>
+                    <p class="feature-desc">4 spaces per level, no tabs. Clean syntax without semicolons or braces, similar to Python but with async superpowers.</p>
+                </div>
+            </div>
+
+            <div class="code-example" style="margin-top: 3rem;">
+                <div class="code-header">
+                    <span class="code-title">Request handling with smart parameter injection</span>
+                    <span class="code-label">Path > Body > Query precedence</span>
+                </div>
+                <pre><span class="keyword">@app.post</span>(<span class="string">"/api/users/&lt;id&gt;"</span>)
+<span class="keyword">fn</span> <span class="function">update_user</span>(id: int, data: Json, role: str = <span class="string">"user"</span>)
+    <span class="comment"># id comes from path parameter</span>
+    <span class="comment"># data is the JSON request body</span>
+    <span class="comment"># role comes from query string (defaults to "user")</span>
+    <span class="keyword">return</span> {<span class="string">"updated"</span>: id, <span class="string">"role"</span>: role}</pre>
+            </div>
+        </div>
+    </section>
+
+    <section class="install" id="install">
+        <div class="section">
+            <h2 class="section-title">Get Started</h2>
+            
+            <div class="install-steps">
+                <div class="install-step">
+                    <span class="step-number">1</span>
+                    <strong>Clone or download Relay</strong>
+                    <div class="install-cmd">git clone &lt;your-repo&gt; && cd relay</div>
+                </div>
+
+                <div class="install-step">
+                    <span class="step-number">2</span>
+                    <strong>Build with Cargo</strong>
+                    <p style="margin: 0.5rem 0; color: #a0aec0; font-size: 0.9rem;">
+                        Relay is a single-file Rust interpreter. Dependencies: tokio, serde, serde_json, reqwest, axum, tower, tower-http, html-escape, indexmap, async-recursion, thiserror, anyhow
+                    </p>
+                    <div class="install-cmd">cargo build --release</div>
+                </div>
+
+                <div class="install-step">
+                    <span class="step-number">3</span>
+                    <strong>Install globally (optional)</strong>
+                    <div class="install-cmd">cargo install --path .</div>
+                </div>
+
+                <div class="install-step">
+                    <span class="step-number">4</span>
+                    <strong>Run your first program</strong>
+                    <div class="install-cmd">relay examples/hello.ry
+# or use cargo directly:
+cargo run -- examples/hello.ry</div>
+                </div>
+
+                <div class="install-step">
+                    <span class="step-number">5</span>
+                    <strong>Configure web server (optional)</strong>
+                    <p style="margin: 0.5rem 0; color: #a0aec0; font-size: 0.9rem;">
+                        Default bind: 127.0.0.1:3000. Override with environment variable:
+                    </p>
+                    <div class="install-cmd">RELAY_BIND=0.0.0.0:8080 relay server.ry</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section">
+        <h2 class="section-title">Standard Library Reference</h2>
+
+        <div style="display: grid; gap: 2rem; margin-top: 3rem;">
+            <div class="code-example">
+                <div class="code-header">
+                    <span class="code-title">Core & Type Conversion</span>
+                </div>
+                <pre><span class="function">print</span>(value)           <span class="comment"># Output to console</span>
+<span class="function">str</span>(x)                 <span class="comment"># Convert to string</span>
+<span class="function">int</span>(x)                 <span class="comment"># Convert to integer</span>
+<span class="function">float</span>(x)               <span class="comment"># Convert to float</span></pre>
+            </div>
+
+            <div class="code-example">
+                <div class="code-header">
+                    <span class="code-title">Async & Concurrency</span>
+                </div>
+                <pre><span class="function">sleep</span>(ms, value)      <span class="comment"># Non-blocking delay, returns value after ms</span>
+<span class="function">spawn</span>(expr)            <span class="comment"># Spawn task, returns Task handle</span>
+<span class="function">all</span>([tasks])          <span class="comment"># Wait for all tasks, return list of results</span>
+<span class="function">race</span>([tasks])         <span class="comment"># Return first completed task result</span>
+<span class="function">timeout</span>(expr, ms)     <span class="comment"># Timeout an expression after ms</span>
+<span class="function">cancel</span>(task)          <span class="comment"># Cancel a running task</span>
+task.<span class="function">join</span>()             <span class="comment"># Wait for task completion</span>
+deferred.<span class="function">resolve</span>()    <span class="comment"># Force resolution of deferred value</span></pre>
+            </div>
+
+            <div class="code-example">
+                <div class="code-header">
+                    <span class="code-title">File System & JSON</span>
+                </div>
+                <pre><span class="function">read_file</span>(path)       <span class="comment"># Read file as string</span>
+<span class="function">save_file</span>(content, path) <span class="comment"># Write string to file</span>
+<span class="function">read_json</span>(path)       <span class="comment"># Read and parse JSON file</span>
+<span class="function">save_json</span>(data, path) <span class="comment"># Serialize and save JSON</span></pre>
+            </div>
+
+            <div class="code-example">
+                <div class="code-header">
+                    <span class="code-title">HTTP Client</span>
+                </div>
+                <pre>http = <span class="function">Http</span>()
+resp = http.<span class="function">get</span>(url)
+resp = http.<span class="function">post</span>(url, data)
+
+<span class="comment"># Response object members:</span>
+resp.status             <span class="comment"># HTTP status code (int)</span>
+resp.text               <span class="comment"># Response body as string</span>
+resp.<span class="function">json</span>()             <span class="comment"># Parse response as JSON</span></pre>
+            </div>
+
+            <div class="code-example">
+                <div class="code-header">
+                    <span class="code-title">Web Server & Routing</span>
+                </div>
+                <pre>app = <span class="function">WebApp</span>()
+route = app.<span class="function">route</span>()         <span class="comment"># Optional: get route handle</span>
+server = <span class="function">WebServer</span>()
+
+<span class="comment"># Decorator routing (use @app or @route):</span>
+<span class="keyword">@app.get</span>(path)
+<span class="keyword">@app.post</span>(path)
+<span class="keyword">@route.get</span>(path)
+<span class="keyword">@route.post</span>(path)
+
+<span class="comment"># Manual response control:</span>
+<span class="function">Response</span>(body, status=<span class="number">200</span>, content_type=<span class="string">"text/plain"</span>)
+
+<span class="comment"># Start server (bind address via RELAY_BIND env var):</span>
+server.<span class="function">run</span>(app)</pre>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <div class="footer-links">
+            <a href="#features">Features</a>
+            <a href="#install">Installation</a>
+            <a href="https://github.com" target="_blank">GitHub</a>
+            <a href="#" target="_blank">Documentation</a>
+        </div>
+        <p>Relay v0.1 • MIT License</p>
+    </footer>
+</body>
+</html>

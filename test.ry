@@ -1,11 +1,8 @@
-app = WebApp()
+http = Http()
+resp = http.get("https://example.com")
+print(resp.status)
+print(resp.text)
 
-@app.get("/")
-fn index()
-    return "Hello world"
-
-@app.get("/<name>")
-fn hello(name)
-    return "Hello {{ name }}"
-
-WebServer.run(app)
+api = http.post("https://httpbin.org/post", {"hello": "relay"})
+json = api.json()
+print(json["json"]["hello"])

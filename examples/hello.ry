@@ -1,5 +1,0 @@
-// Say Hello
-
-sleep(2000, print("world"))
-
-print("hello")
