@@ -32,7 +32,14 @@ Relay feels like:
 
 ## Quick start
 
-Build the CLI and run a `.ry` file:
+Install the CLI locally and run a `.ry` file:
+
+```bash
+cargo install --path .
+relay path/to/file.ry
+```
+
+If you're iterating on the compiler, you can still run it directly:
 
 ```bash
 cargo run -- path/to/file.ry
