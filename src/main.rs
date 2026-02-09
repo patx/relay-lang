@@ -1133,6 +1133,7 @@ impl Value {
 
 // ========================= Env =========================
 
+#[derive(Clone)]
 struct Env {
     scopes: Vec<HashMap<String, Value>>,
 }
@@ -1210,6 +1211,11 @@ enum Flow {
 impl Evaluator {
     fn new(env: Arc<tokio::sync::Mutex<Env>>) -> Self {
         Self { env }
+    }
+
+    async fn snapshot_env(&self) -> Arc<tokio::sync::Mutex<Env>> {
+        let env = self.env.lock().await;
+        Arc::new(tokio::sync::Mutex::new(env.clone()))
     }
 
     async fn eval_program(&self, p: &Program) -> RResult<Value> {
@@ -1461,7 +1467,8 @@ let mut a = Vec::new();
 for (idx, x) in args.iter().enumerate() {
     if (is_sleep_ident && idx == 1) || is_print_ident {
         // Pass unevaluated expression as a thunk (evaluated after delay or in print)
-        a.push(Value::Thunk(Arc::new(Thunk::new(x.clone(), self.env.clone()))));
+        let env = self.snapshot_env().await;
+        a.push(Value::Thunk(Arc::new(Thunk::new(x.clone(), env))));
         continue;
     }
     let v = self.eval_expr(x).await?;
