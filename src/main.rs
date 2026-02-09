@@ -2040,23 +2040,19 @@ env.set(
                     _ => return Err(RelayError::Type("race([..]) expects a list".into())),
                 };
                 let d = Deferred::new(Box::pin(async move {
-                    let mut handles = Vec::new();
+                    let mut join_set = tokio::task::JoinSet::new();
                     for v in list {
-                        handles.push(tokio::spawn(async move {
+                        join_set.spawn(async move {
                             match v {
                                 Value::Deferred(d) => d.resolve().await,
                                 Value::Task(t) => t.join().await,
                                 x => Ok(x),
                             }
-                        }));
+                        });
                     }
-                    loop {
-                        for h in &mut handles {
-                            if h.is_finished() {
-                                return h.await.map_err(|e| RelayError::Runtime(e.to_string()))?;
-                            }
-                        }
-                        tokio::task::yield_now().await;
+                    match join_set.join_next().await {
+                        Some(r) => r.map_err(|e| RelayError::Runtime(e.to_string()))?,
+                        None => Err(RelayError::Runtime("race([..]) expects at least one task".into())),
                     }
                 }));
                 Ok(Value::Deferred(Arc::new(d)))
@@ -2283,9 +2279,9 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
         };
     }
 
-    let addr = "127.0.0.1:8080";
+    let addr = std::env::var("RELAY_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
     println!("Relay WebServer listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| RelayError::Runtime(e.to_string()))?;
     axum::serve(listener, router)
