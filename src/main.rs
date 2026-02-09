@@ -1234,6 +1234,31 @@ impl Evaluator {
         Ok(Flow::None)
     }
 
+    async fn eval_block_implicit_return(&self, b: &[Stmt]) -> RResult<Value> {
+        if b.is_empty() {
+            return Ok(Value::None);
+        }
+        for (idx, s) in b.iter().enumerate() {
+            let is_last = idx + 1 == b.len();
+            if !is_last {
+                match self.eval_stmt(s).await? {
+                    Flow::None => {}
+                    Flow::Return(v) => return Ok(v),
+                }
+                continue;
+            }
+
+            match s {
+                Stmt::Expr(e) => return self.eval_expr(e).await,
+                _ => match self.eval_stmt(s).await? {
+                    Flow::None => return Ok(Value::None),
+                    Flow::Return(v) => return Ok(v),
+                },
+            }
+        }
+        Ok(Value::None)
+    }
+
     #[async_recursion]
     async fn eval_stmt(&self, s: &Stmt) -> RResult<Flow> {
         match s {
@@ -1541,17 +1566,14 @@ for (idx, x) in args.iter().enumerate() {
             }
         }
 
-        let flow = self.eval_block(&f.body).await?;
+        let result = self.eval_block_implicit_return(&f.body).await?;
 
         {
             let mut env = self.env.lock().await;
             env.pop();
         }
 
-        Ok(match flow {
-            Flow::None => Value::None,
-            Flow::Return(v) => v,
-        })
+        Ok(result)
     }
 
     async fn get_member(&self, obj: Value, name: &str) -> RResult<Value> {
