@@ -5,7 +5,7 @@
 // - Stdlib: timers, fs/json, str/int/float, http client, web server + routing (Axum)
 // Build:
 //   cargo new relay && replace src/main.rs with this file contents (or use as relay.rs)
-//   Cargo.toml deps: tokio, thiserror, serde, serde_json, reqwest, axum, tower, tower-http, html-escape, indexmap
+//   Cargo.toml deps: tokio, thiserror, serde, serde_json, reqwest, axum, tower, tower-http, html-escape, indexmap, mongodb, futures
 // Run:
 //   cargo run -- path/to/app.ry
 
@@ -25,11 +25,18 @@ use axum::{
     Json as AxumJson, Router,
 };
 
+use async_recursion::async_recursion;
+use futures::stream::TryStreamExt;
 use html_escape::encode_safe;
 use indexmap::IndexMap;
+use mongodb::{
+    bson::{self, Bson, Document},
+    Client as MongoClient,
+    Collection as MongoCollection,
+    Database as MongoDatabase,
+};
 use serde_json::Value as J;
 use thiserror::Error;
-use async_recursion::async_recursion;
 use std::sync::OnceLock;
 
 
@@ -1026,6 +1033,9 @@ enum Object {
     WebServer(WebServerHandle),
     Http(HttpHandle),
     HttpResponse(HttpResponseHandle),
+    MongoClient(MongoClientHandle),
+    MongoDatabase(MongoDatabaseHandle),
+    MongoCollection(MongoCollectionHandle),
 }
 
 #[derive(Clone)]
@@ -2108,6 +2118,21 @@ env.set(
         Value::Builtin(Arc::new(|_args, _| Box::pin(async move { Ok(Value::Obj(Object::Http(HttpHandle::new()))) }))),
     );
 
+    // MongoDB client
+    env.set(
+        "Mongo",
+        Value::Builtin(Arc::new(|args, _| {
+            Box::pin(async move {
+                let uri = expect_str(&args, 0, "Mongo(uri)")?;
+                let d = Deferred::new(Box::pin(async move {
+                    let client = MongoClient::with_uri_str(uri).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                    Ok(Value::Obj(Object::MongoClient(MongoClientHandle::new(client))))
+                }));
+                Ok(Value::Deferred(Arc::new(d)))
+            })
+        })),
+    );
+
     // Hook global callback for web requests -> interpreter calls
     // We call handler by name and inject params (Path > Body > Query)
     set_global_callback(Arc::new(move |fn_name, req| {
@@ -2132,6 +2157,39 @@ fn expect_int(args: &[Value], i: usize, sig: &str) -> RResult<i64> {
         Some(Value::Str(s)) => s.trim().parse().map_err(|_| RelayError::Type(format!("{sig} expects int"))),
         _ => Err(RelayError::Type(format!("{sig} expects int"))),
     }
+}
+
+fn value_to_json(v: &Value) -> J {
+    match v {
+        Value::Json(j) => j.clone(),
+        Value::Dict(m) => {
+            let mut obj = serde_json::Map::new();
+            for (k, vv) in m {
+                obj.insert(k.clone(), value_to_json(vv));
+            }
+            J::Object(obj)
+        }
+        Value::List(vs) => J::Array(vs.iter().map(value_to_json).collect()),
+        Value::Str(s) => J::String(s.clone()),
+        Value::Int(n) => J::Number((*n).into()),
+        Value::Float(f) => serde_json::Number::from_f64(*f).map(J::Number).unwrap_or(J::Null),
+        Value::Bool(b) => J::Bool(*b),
+        Value::None => J::Null,
+        Value::Bytes(b) => J::String(format!("<bytes {}>", b.len())),
+        other => J::String(other.repr()),
+    }
+}
+
+fn value_to_document(v: Value, sig: &str) -> RResult<Document> {
+    let json = value_to_json(&v);
+    match json {
+        J::Object(_) => bson::to_document(&json).map_err(|e| RelayError::Runtime(format!("{sig}: {e}"))),
+        _ => Err(RelayError::Type(format!("{sig} expects a dict/json object"))),
+    }
+}
+
+fn bson_to_json(bson: Bson) -> RResult<J> {
+    serde_json::to_value(bson).map_err(|e| RelayError::Runtime(e.to_string()))
 }
 
 // ========================= Web runtime (Axum) =========================
@@ -2439,6 +2497,198 @@ impl HttpResponseHandle {
     }
 }
 
+// ========================= MongoDB =========================
+
+#[derive(Clone)]
+struct MongoClientHandle {
+    client: MongoClient,
+}
+#[derive(Clone)]
+struct MongoDatabaseHandle {
+    db: MongoDatabase,
+}
+#[derive(Clone)]
+struct MongoCollectionHandle {
+    collection: MongoCollection<Document>,
+}
+
+impl MongoClientHandle {
+    fn new(client: MongoClient) -> Self {
+        Self { client }
+    }
+    fn get_member(&self, name: &str) -> Value {
+        match name {
+            "db" => {
+                let client = self.client.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let client = client.clone();
+                    Box::pin(async move {
+                        let name = expect_str(&args, 0, "mongo.db(name)")?;
+                        Ok(Value::Obj(Object::MongoDatabase(MongoDatabaseHandle { db: client.database(&name) })))
+                    })
+                }))
+            }
+            _ => Value::None,
+        }
+    }
+}
+
+impl MongoDatabaseHandle {
+    fn get_member(&self, name: &str) -> Value {
+        match name {
+            "collection" => {
+                let db = self.db.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let db = db.clone();
+                    Box::pin(async move {
+                        let name = expect_str(&args, 0, "db.collection(name)")?;
+                        Ok(Value::Obj(Object::MongoCollection(MongoCollectionHandle { collection: db.collection::<Document>(&name) })))
+                    })
+                }))
+            }
+            _ => Value::None,
+        }
+    }
+}
+
+impl MongoCollectionHandle {
+    fn get_member(&self, name: &str) -> Value {
+        match name {
+            "insert_one" => {
+                let collection = self.collection.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let collection = collection.clone();
+                    Box::pin(async move {
+                        let doc = value_to_document(args.get(0).cloned().unwrap_or(Value::None), "collection.insert_one(doc)")?;
+                        let d = Deferred::new(Box::pin(async move {
+                            let result = collection.insert_one(doc, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let mut obj = serde_json::Map::new();
+                            obj.insert("inserted_id".into(), bson_to_json(result.inserted_id)?);
+                            Ok(Value::Json(J::Object(obj)))
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            "insert_many" => {
+                let collection = self.collection.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let collection = collection.clone();
+                    Box::pin(async move {
+                        let list = match args.get(0) {
+                            Some(Value::List(v)) => v.clone(),
+                            _ => return Err(RelayError::Type("collection.insert_many(docs) expects a list".into())),
+                        };
+                        let mut docs = Vec::with_capacity(list.len());
+                        for v in list {
+                            docs.push(value_to_document(v, "collection.insert_many(docs)")?);
+                        }
+                        let d = Deferred::new(Box::pin(async move {
+                            let result = collection.insert_many(docs, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let mut obj = serde_json::Map::new();
+                            let mut ids = serde_json::Map::new();
+                            for (k, v) in result.inserted_ids {
+                                ids.insert(k.to_string(), bson_to_json(v)?);
+                            }
+                            obj.insert("inserted_ids".into(), J::Object(ids));
+                            Ok(Value::Json(J::Object(obj)))
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            "find_one" => {
+                let collection = self.collection.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let collection = collection.clone();
+                    Box::pin(async move {
+                        let filter = value_to_document(args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())), "collection.find_one(filter)")?;
+                        let d = Deferred::new(Box::pin(async move {
+                            let result = collection.find_one(filter, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            match result {
+                                Some(doc) => Ok(Value::Json(bson_to_json(Bson::Document(doc))?)),
+                                None => Ok(Value::None),
+                            }
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            "find" => {
+                let collection = self.collection.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let collection = collection.clone();
+                    Box::pin(async move {
+                        let filter = value_to_document(args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())), "collection.find(filter)")?;
+                        let d = Deferred::new(Box::pin(async move {
+                            let mut cursor = collection.find(filter, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let mut out = Vec::new();
+                            while let Some(doc) = cursor.try_next().await.map_err(|e| RelayError::Runtime(e.to_string()))? {
+                                out.push(Value::Json(bson_to_json(Bson::Document(doc))?));
+                            }
+                            Ok(Value::List(out))
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            "update_one" => {
+                let collection = self.collection.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let collection = collection.clone();
+                    Box::pin(async move {
+                        if args.len() < 2 {
+                            return Err(RelayError::Type("collection.update_one(filter, update)".into()));
+                        }
+                        let filter = value_to_document(args[0].clone(), "collection.update_one(filter, update)")?;
+                        let update = value_to_document(args[1].clone(), "collection.update_one(filter, update)")?;
+                        let d = Deferred::new(Box::pin(async move {
+                            let result = collection.update_one(filter, update, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let mut obj = serde_json::Map::new();
+                            obj.insert("matched_count".into(), J::Number(result.matched_count.into()));
+                            obj.insert("modified_count".into(), J::Number(result.modified_count.into()));
+                            if let Some(id) = result.upserted_id {
+                                obj.insert("upserted_id".into(), bson_to_json(id)?);
+                            }
+                            Ok(Value::Json(J::Object(obj)))
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            "delete_one" => {
+                let collection = self.collection.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let collection = collection.clone();
+                    Box::pin(async move {
+                        let filter = value_to_document(args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())), "collection.delete_one(filter)")?;
+                        let d = Deferred::new(Box::pin(async move {
+                            let result = collection.delete_one(filter, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            Ok(Value::Int(result.deleted_count as i64))
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            "delete_many" => {
+                let collection = self.collection.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let collection = collection.clone();
+                    Box::pin(async move {
+                        let filter = value_to_document(args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())), "collection.delete_many(filter)")?;
+                        let d = Deferred::new(Box::pin(async move {
+                            let result = collection.delete_many(filter, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            Ok(Value::Int(result.deleted_count as i64))
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            _ => Value::None,
+        }
+    }
+}
+
 // ========================= Object dispatch (member + call) =========================
 
 impl Object {
@@ -2474,6 +2724,9 @@ impl Object {
             },
             Object::Http(h) => h.get_member(name),
             Object::HttpResponse(r) => r.get_member(name),
+            Object::MongoClient(m) => m.get_member(name),
+            Object::MongoDatabase(d) => d.get_member(name),
+            Object::MongoCollection(c) => c.get_member(name),
         })
     }
 
