@@ -538,7 +538,7 @@ impl<'a> Lexer<'a> {
         self.peek2("//") || self.peek2("/*")
     }
 
-    fn count_leading_ws(&mut self) -> (usize, bool) {
+    fn count_leading_ws(&self) -> (usize, bool) {
         let mut j = self.i;
         let mut spaces = 0usize;
         let mut has_tabs = false;
@@ -553,9 +553,6 @@ impl<'a> Lexer<'a> {
             } else {
                 break;
             }
-        }
-        while self.i < j {
-            self.advance_char();
         }
         (spaces, has_tabs)
     }
@@ -947,19 +944,6 @@ impl Parser {
         self.skip_newlines();
         let mut out = Vec::new();
         while !self.eof() && !self.peek_is(&Tok::Dedent) {
-            if self.peek_else() {
-                let Some(Stmt::If { else_block, .. }) = out.last_mut() else {
-                    return Err(self.err_here("'else' without matching if"));
-                };
-                if !else_block.is_empty() {
-                    return Err(self.err_here("Multiple 'else' clauses for if"));
-                }
-                self.bump(); // else
-                self.expect_newline()?;
-                *else_block = self.parse_block()?;
-                self.skip_newlines();
-                continue;
-            }
             out.push(self.parse_stmt()?);
             self.skip_newlines();
         }
@@ -4361,4 +4345,56 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", result.repr());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_src(src: &str) -> RResult<Program> {
+        let mut lexer = Lexer::new(src);
+        let tokens = lexer.tokenize()?;
+        let mut parser = Parser::new(tokens);
+        parser.parse_program()
+    }
+
+    #[test]
+    fn parses_if_else_block_in_function() {
+        let src = r#"fn example()
+    x = 10
+    if (x > 5)
+        print("x is greater than 5")
+    else
+        print("x is 5 or less")
+"#;
+
+        let program = parse_src(src).expect("if/else should parse");
+        assert_eq!(program.stmts.len(), 1);
+
+        let Stmt::FuncDef { body, .. } = &program.stmts[0] else {
+            panic!("expected function definition");
+        };
+        assert_eq!(body.len(), 2);
+        assert!(matches!(body[1], Stmt::If { .. }));
+
+        let Stmt::If { else_block, .. } = &body[1] else {
+            panic!("expected if statement");
+        };
+        assert_eq!(else_block.len(), 1, "else block should be attached to if");
+    }
+
+    #[test]
+    fn reports_dangling_else() {
+        let src = r#"fn example()
+    x = 10
+    else
+        print("dangling")
+"#;
+
+        let err = parse_src(src).expect_err("dangling else should fail");
+        assert!(matches!(
+            err,
+            RelayError::Syntax { msg, .. } if msg.contains("without matching if")
+        ));
+    }
 }
