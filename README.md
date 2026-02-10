@@ -40,6 +40,8 @@ Relay is designed for building high-performance web services, APIs, and network 
 - **Implicit Async**: No `await` keyword needed—async operations resolve automatically when values are accessed
 - **Python-like Syntax**: Clean, indentation-based syntax that's easy to read and write
 - **Built-in Web Server**: Flask/FastAPI-style decorators with automatic routing
+- **Static File Serving**: Mount directories directly in your web app (`app.static("/assets", "./public")`)
+- **Middleware Hooks**: Run request middleware before handlers (`app.use(auth_middleware)`)
 - **HTTP Client**: Simple, async HTTP requests built-in
 - **MongoDB Integration**: Native async MongoDB support
 - **Session Management**: Built-in session handling with HttpOnly cookies
@@ -95,9 +97,16 @@ Notice how "hello" prints immediately while "world" waits 2 seconds—all withou
 app = WebApp()
 server = WebServer()
 
+fn auth()
+    if (request.path == "/private" && session["user"] == None)
+        return app.redirect("/login")
+
+app.use(auth)
+app.static("/assets", "./public")
+
 @app.get("/")
 fn index()
-    return {"message": "Hello, Relay!"}
+    return "Hello, {{ user }}"
 
 server.run(app)
 ```
