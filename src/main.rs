@@ -2027,33 +2027,31 @@ impl Evaluator {
                 self.call_value(c, a, kw).await
             }
 
-            Expr::BinOp { left, op, right } => {
-                match op {
-                    BinOp::And => {
-                        let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
-                        if !l.truthy() {
-                            Ok(Value::Bool(false))
-                        } else {
-                            let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
-                            Ok(Value::Bool(r.truthy()))
-                        }
-                    }
-                    BinOp::Or => {
-                        let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
-                        if l.truthy() {
-                            Ok(Value::Bool(true))
-                        } else {
-                            let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
-                            Ok(Value::Bool(r.truthy()))
-                        }
-                    }
-                    _ => {
-                        let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
+            Expr::BinOp { left, op, right } => match op {
+                BinOp::And => {
+                    let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
+                    if !l.truthy() {
+                        Ok(Value::Bool(false))
+                    } else {
                         let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
-                        eval_bin(*op, l, r)
+                        Ok(Value::Bool(r.truthy()))
                     }
                 }
-            }
+                BinOp::Or => {
+                    let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
+                    if l.truthy() {
+                        Ok(Value::Bool(true))
+                    } else {
+                        let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
+                        Ok(Value::Bool(r.truthy()))
+                    }
+                }
+                _ => {
+                    let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
+                    let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
+                    eval_bin(*op, l, r)
+                }
+            },
 
             Expr::Unary { op, expr } => {
                 let v = self.resolve_if_needed(self.eval_expr(expr).await?).await?;
@@ -2297,6 +2295,8 @@ fn coerce_param_type(ty: &str, v: Value) -> RResult<Value> {
 fn eval_bin(op: BinOp, l: Value, r: Value) -> RResult<Value> {
     use BinOp::*;
     Ok(match op {
+        And => Value::Bool(l.truthy() && r.truthy()),
+        Or => Value::Bool(l.truthy() || r.truthy()),
         Add => bin_add(l, r)?,
         Sub => bin_sub(l, r)?,
         Mul => bin_mul(l, r)?,
