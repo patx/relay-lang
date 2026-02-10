@@ -18,8 +18,8 @@ use std::{
 };
 
 use axum::{
-    extract::{Path, Query},
-    http::{HeaderMap, Method, StatusCode},
+    extract::{Method, Path, Query},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json as AxumJson, Router,
