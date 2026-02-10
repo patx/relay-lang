@@ -721,6 +721,12 @@ impl Parser {
             return self.parse_import();
         }
 
+        if self.peek_else() {
+            return Err(
+                self.err_here("'else' without matching if (check indentation and block structure)")
+            );
+        }
+
         if self.peek_destructure_assign() {
             return self.parse_destructure_assign();
         }
@@ -820,7 +826,13 @@ impl Parser {
         self.expect_newline()?;
         let then_block = self.parse_block()?;
         let mut else_block = Vec::new();
+
         self.skip_newlines();
+        while self.peek_is(&Tok::Dedent) && self.peek_n_else(1) {
+            self.bump();
+            self.skip_newlines();
+        }
+
         if self.peek_else() {
             self.bump();
             self.expect_newline()?;
@@ -1203,6 +1215,10 @@ impl Parser {
             .get(self.i + n)
             .map(|t| &t.kind == k)
             .unwrap_or(false)
+    }
+    fn peek_n_else(&self, n: usize) -> bool {
+        matches!(self.t.get(self.i + n), Some(Token { kind: Tok::Keyword(k), .. }) if k == "else")
+            || matches!(self.t.get(self.i + n), Some(Token { kind: Tok::Ident(s), .. }) if s == "else")
     }
     fn peek_op(&self, s: &str) -> bool {
         matches!(self.peek(), Some(Token { kind: Tok::Op(op), .. }) if op == s)
