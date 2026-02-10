@@ -11,8 +11,9 @@
 //   cargo run -- path/to/app.ry
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
+    path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
@@ -70,6 +71,9 @@ struct Program {
 #[derive(Debug, Clone)]
 enum Stmt {
     Expr(Expr),
+    Import {
+        module: String,
+    },
     Assign {
         name: String,
         expr: Expr,
@@ -228,7 +232,7 @@ enum Tok {
     Colon,  // used in dict literals only
     Op(String),
 
-    Keyword(String), // fn if for while return True False None str int float
+    Keyword(String), // fn if for while return try except import True False None str int float
 }
 
 #[derive(Debug, Clone)]
@@ -427,7 +431,7 @@ impl<'a> Lexer<'a> {
                         let id = self.read_ident();
                         let k = match id.as_str() {
                             "fn" | "if" | "for" | "while" | "return" | "try" | "except"
-                            | "True" | "False" | "None" | "str" | "int" | "float" => {
+                            | "import" | "True" | "False" | "None" | "str" | "int" | "float" => {
                                 Tok::Keyword(id)
                             }
                             _ => Tok::Ident(id),
@@ -675,6 +679,9 @@ impl Parser {
         if self.peek_kw("try") {
             return self.parse_try_except();
         }
+        if self.peek_kw("import") {
+            return self.parse_import();
+        }
 
         if self.peek_destructure_assign() {
             return self.parse_destructure_assign();
@@ -844,6 +851,17 @@ impl Parser {
             try_block,
             except_block,
         })
+    }
+
+    fn parse_import(&mut self) -> RResult<Stmt> {
+        self.expect_kw("import")?;
+        let mut module = self.expect_ident()?;
+        while self.peek_is(&Tok::Dot) {
+            self.bump();
+            module.push('.');
+            module.push_str(&self.expect_ident()?);
+        }
+        Ok(Stmt::Import { module })
     }
 
     fn peek_destructure_assign(&self) -> bool {
@@ -1316,9 +1334,7 @@ impl Thunk {
         Self { expr, env }
     }
     async fn run(&self) -> RResult<Value> {
-        let ev = Evaluator {
-            env: self.env.clone(),
-        };
+        let ev = Evaluator::new(self.env.clone());
         ev.eval_expr(&self.expr).await
     }
 }
@@ -1449,6 +1465,13 @@ fn render_template(s: &str, locals: &HashMap<String, Value>) -> String {
 
 struct Evaluator {
     env: Arc<tokio::sync::Mutex<Env>>,
+    module_state: Arc<tokio::sync::Mutex<ModuleState>>,
+}
+
+#[derive(Debug, Clone)]
+struct ModuleState {
+    loaded: HashSet<PathBuf>,
+    stack: Vec<PathBuf>,
 }
 
 enum Flow {
@@ -1458,7 +1481,13 @@ enum Flow {
 
 impl Evaluator {
     fn new(env: Arc<tokio::sync::Mutex<Env>>) -> Self {
-        Self { env }
+        Self {
+            env,
+            module_state: Arc::new(tokio::sync::Mutex::new(ModuleState {
+                loaded: HashSet::new(),
+                stack: Vec::new(),
+            })),
+        }
     }
 
     async fn snapshot_env(&self) -> Arc<tokio::sync::Mutex<Env>> {
@@ -1476,6 +1505,71 @@ impl Evaluator {
             last = Value::None;
         }
         Ok(last)
+    }
+
+    async fn eval_program_in_file(&self, p: &Program, file_path: PathBuf) -> RResult<Value> {
+        {
+            let mut state = self.module_state.lock().await;
+            state.loaded.insert(file_path.clone());
+            state.stack.push(file_path);
+        }
+        let result = self.eval_program(p).await;
+        {
+            let mut state = self.module_state.lock().await;
+            state.stack.pop();
+        }
+        result
+    }
+
+    fn module_name_to_relative_path(module: &str) -> PathBuf {
+        if module.ends_with(".ry") || module.contains('/') {
+            return PathBuf::from(module);
+        }
+        let mut pb = PathBuf::new();
+        for part in module.split('.') {
+            pb.push(part);
+        }
+        pb.set_extension("ry");
+        pb
+    }
+
+    async fn import_module(&self, module: &str) -> RResult<()> {
+        let module_path = Self::module_name_to_relative_path(module);
+        let base_dir = {
+            let state = self.module_state.lock().await;
+            state
+                .stack
+                .last()
+                .and_then(|p| p.parent().map(|parent| parent.to_path_buf()))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        };
+        let candidate = base_dir.join(module_path);
+        let canonical = tokio::fs::canonicalize(&candidate).await.map_err(|e| {
+            RelayError::Runtime(format!(
+                "Failed to resolve module '{module}' from '{}': {e}",
+                candidate.display()
+            ))
+        })?;
+
+        {
+            let state = self.module_state.lock().await;
+            if state.loaded.contains(&canonical) {
+                return Ok(());
+            }
+        }
+
+        let src = tokio::fs::read_to_string(&canonical).await.map_err(|e| {
+            RelayError::Runtime(format!(
+                "Failed to read module '{}': {e}",
+                canonical.display()
+            ))
+        })?;
+        let mut lexer = Lexer::new(&src);
+        let tokens = lexer.tokenize()?;
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program()?;
+        self.eval_program_in_file(&program, canonical).await?;
+        Ok(())
     }
 
     async fn eval_block(&self, b: &[Stmt]) -> RResult<Flow> {
@@ -1537,6 +1631,10 @@ impl Evaluator {
                     _ => {}
                 }
 
+                Ok(Flow::None)
+            }
+            Stmt::Import { module } => {
+                self.import_module(module).await?;
                 Ok(Flow::None)
             }
             Stmt::Assign { name, expr } => {
@@ -3706,6 +3804,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program()?;
+    let entry_path = tokio::fs::canonicalize(&path).await?;
 
     let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
     let evaluator = Arc::new(Evaluator::new(env.clone()));
@@ -3721,7 +3820,7 @@ async fn main() -> anyhow::Result<()> {
 
     // run program (this defines functions, registers decorators if route exists before defs)
     let result = evaluator
-        .eval_program(&program)
+        .eval_program_in_file(&program, entry_path)
         .await
         .map_err(anyhow::Error::msg)?;
 

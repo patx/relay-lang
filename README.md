@@ -172,6 +172,24 @@ fn example()
 x = 42  // This is also a comment
 ```
 
+### Modules and Imports
+
+Relay supports loading code from multiple `.ry` files with `import`:
+
+```relay
+import utils
+import web.routes
+import shared/helpers.ry
+```
+
+**How imports resolve:**
+- `import utils` loads `utils.ry`
+- `import web.routes` loads `web/routes.ry`
+- Relative paths are resolved from the importing file's directory
+- A module is loaded only once per run (duplicate imports are ignored)
+
+Imported modules execute in the same global scope, so functions and variables they define become directly available.
+
 ### Data Types
 
 #### Primitives
@@ -1825,7 +1843,7 @@ cargo run -- examples/hello.ry
 
 - Follow Rust conventions and `rustfmt` formatting
 - Add comments for complex logic
-- Keep the single-file architecture for now (v0.1)
+- Core interpreter remains in a single Rust file (v0.1) while Relay scripts support multi-file imports
 - Update this README for any user-facing changes
 
 ### Reporting Issues
@@ -1840,7 +1858,7 @@ Found a bug? [Open an issue](https://github.com/patx/relay-lang/issues) with:
 ## Roadmap
 
 **v0.2 (Planned):**
-- [ ] Multiple file support and imports
+- [x] Multiple file support and imports
 - [x] List comprehensions
 - [x] Destructuring assignment
 - [x] Error handling with try/except
