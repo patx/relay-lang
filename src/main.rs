@@ -19,7 +19,7 @@ use std::{
 
 use axum::{
     extract::{Path, Query},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json as AxumJson, Router,
@@ -31,21 +31,22 @@ use html_escape::encode_safe;
 use indexmap::IndexMap;
 use mongodb::{
     bson::{self, Bson, Document},
-    Client as MongoClient,
-    Collection as MongoCollection,
-    Database as MongoDatabase,
+    Client as MongoClient, Collection as MongoCollection, Database as MongoDatabase,
 };
 use serde_json::Value as J;
-use thiserror::Error;
 use std::sync::OnceLock;
-
+use thiserror::Error;
 
 // ========================= Errors =========================
 
 #[derive(Debug, Error)]
 pub enum RelayError {
     #[error("Syntax error: {msg} at line {line}, col {col}")]
-    Syntax { msg: String, line: usize, col: usize },
+    Syntax {
+        msg: String,
+        line: usize,
+        col: usize,
+    },
 
     #[error("Runtime error: {0}")]
     Runtime(String),
@@ -68,13 +69,31 @@ struct Program {
 #[derive(Debug, Clone)]
 enum Stmt {
     Expr(Expr),
-    Assign { name: String, expr: Expr },
-    AugAssign { name: String, op: AugOp, expr: Expr },
+    Assign {
+        name: String,
+        expr: Expr,
+    },
+    AugAssign {
+        name: String,
+        op: AugOp,
+        expr: Expr,
+    },
     Return(Option<Expr>),
 
-    If { cond: Expr, then_block: Vec<Stmt>, else_block: Vec<Stmt> },
-    While { cond: Expr, body: Vec<Stmt> },
-    For { var: String, iter: Expr, body: Vec<Stmt> },
+    If {
+        cond: Expr,
+        then_block: Vec<Stmt>,
+        else_block: Vec<Stmt>,
+    },
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+    },
+    For {
+        var: String,
+        iter: Expr,
+        body: Vec<Stmt>,
+    },
 
     FuncDef {
         name: String,
@@ -119,16 +138,29 @@ enum Expr {
     List(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
 
-    Member { object: Box<Expr>, name: String }, // obj.name
+    Member {
+        object: Box<Expr>,
+        name: String,
+    }, // obj.name
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
         kwargs: Vec<(String, Expr)>,
     },
-    Index { target: Box<Expr>, index: Box<Expr> },
+    Index {
+        target: Box<Expr>,
+        index: Box<Expr>,
+    },
 
-    BinOp { left: Box<Expr>, op: BinOp, right: Box<Expr> },
-    Unary { op: UnaryOp, expr: Box<Expr> },
+    BinOp {
+        left: Box<Expr>,
+        op: BinOp,
+        right: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -378,8 +410,8 @@ impl<'a> Lexer<'a> {
                     if is_ident_start(c) {
                         let id = self.read_ident();
                         let k = match id.as_str() {
-                            "fn" | "if" | "for" | "while" | "return" | "True" | "False" | "None" | "str"
-                            | "int" | "float" => Tok::Keyword(id),
+                            "fn" | "if" | "for" | "while" | "return" | "True" | "False"
+                            | "None" | "str" | "int" | "float" => Tok::Keyword(id),
                             _ => Tok::Ident(id),
                         };
                         out.push(self.wrap(k));
@@ -401,13 +433,21 @@ impl<'a> Lexer<'a> {
     }
 
     fn tok(&self, kind: Tok) -> Token {
-        Token { kind, line: self.line, col: self.col }
+        Token {
+            kind,
+            line: self.line,
+            col: self.col,
+        }
     }
     fn wrap(&self, kind: Tok) -> Token {
         self.tok(kind)
     }
     fn err(&self, msg: &str) -> RelayError {
-        RelayError::Syntax { msg: msg.into(), line: self.line, col: self.col }
+        RelayError::Syntax {
+            msg: msg.into(),
+            line: self.line,
+            col: self.col,
+        }
     }
 
     fn peek_char(&self) -> Option<char> {
@@ -501,7 +541,9 @@ impl<'a> Lexer<'a> {
             }
             if c == '\\' {
                 self.advance_char();
-                let esc = self.peek_char().ok_or_else(|| self.err("Bad string escape"))?;
+                let esc = self
+                    .peek_char()
+                    .ok_or_else(|| self.err("Bad string escape"))?;
                 self.advance_char();
                 out.push(match esc {
                     'n' => '\n',
@@ -615,14 +657,25 @@ impl Parser {
 
         // assignment
         if let Some(name) = self.peek_ident_string() {
-            if self.peek_n_is(1, &Tok::Assign) || self.peek_n_is(1, &Tok::AugAdd) || self.peek_n_is(1, &Tok::AugSub) {
+            if self.peek_n_is(1, &Tok::Assign)
+                || self.peek_n_is(1, &Tok::AugAdd)
+                || self.peek_n_is(1, &Tok::AugSub)
+            {
                 self.bump(); // ident
                 let op = self.bump().kind.clone();
                 let expr = self.parse_expr()?;
                 return Ok(match op {
                     Tok::Assign => Stmt::Assign { name, expr },
-                    Tok::AugAdd => Stmt::AugAssign { name, op: AugOp::Add, expr },
-                    Tok::AugSub => Stmt::AugAssign { name, op: AugOp::Sub, expr },
+                    Tok::AugAdd => Stmt::AugAssign {
+                        name,
+                        op: AugOp::Add,
+                        expr,
+                    },
+                    Tok::AugSub => Stmt::AugAssign {
+                        name,
+                        op: AugOp::Sub,
+                        expr,
+                    },
                     _ => unreachable!(),
                 });
             }
@@ -665,7 +718,11 @@ impl Parser {
                     default = Some(self.parse_expr()?);
                 }
 
-                params.push(Param { name: pname, ty, default });
+                params.push(Param {
+                    name: pname,
+                    ty,
+                    default,
+                });
 
                 if self.peek_is(&Tok::Comma) {
                     self.bump();
@@ -677,7 +734,12 @@ impl Parser {
         self.expect(&Tok::RParen)?;
         self.expect_newline()?;
         let body = self.parse_block()?;
-        Ok(Stmt::FuncDef { name, params, body, decorators })
+        Ok(Stmt::FuncDef {
+            name,
+            params,
+            body,
+            decorators,
+        })
     }
 
     fn parse_if(&mut self) -> RResult<Stmt> {
@@ -694,7 +756,11 @@ impl Parser {
             self.expect_newline()?;
             else_block = self.parse_block()?;
         }
-        Ok(Stmt::If { cond, then_block, else_block })
+        Ok(Stmt::If {
+            cond,
+            then_block,
+            else_block,
+        })
     }
 
     fn parse_while(&mut self) -> RResult<Stmt> {
@@ -760,7 +826,11 @@ impl Parser {
             }
             self.bump(); // op
             let right = self.parse_binop(prec + 1)?;
-            left = Expr::BinOp { left: Box::new(left), op, right: Box::new(right) };
+            left = Expr::BinOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(left)
     }
@@ -769,12 +839,18 @@ impl Parser {
         if self.peek_op("-") {
             self.bump();
             let e = self.parse_unary()?;
-            return Ok(Expr::Unary { op: UnaryOp::Neg, expr: Box::new(e) });
+            return Ok(Expr::Unary {
+                op: UnaryOp::Neg,
+                expr: Box::new(e),
+            });
         }
         if self.peek_ident_string().as_deref() == Some("not") {
             self.bump();
             let e = self.parse_unary()?;
-            return Ok(Expr::Unary { op: UnaryOp::Not, expr: Box::new(e) });
+            return Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(e),
+            });
         }
         self.parse_postfix()
     }
@@ -786,7 +862,10 @@ impl Parser {
             if self.peek_is(&Tok::Dot) {
                 self.bump();
                 let name = self.expect_ident()?;
-                e = Expr::Member { object: Box::new(e), name };
+                e = Expr::Member {
+                    object: Box::new(e),
+                    name,
+                };
                 continue;
             }
 
@@ -817,7 +896,11 @@ impl Parser {
                     }
                 }
                 self.expect(&Tok::RParen)?;
-                e = Expr::Call { callee: Box::new(e), args, kwargs };
+                e = Expr::Call {
+                    callee: Box::new(e),
+                    args,
+                    kwargs,
+                };
                 continue;
             }
 
@@ -825,7 +908,10 @@ impl Parser {
                 self.bump();
                 let idx = self.parse_expr()?;
                 self.expect(&Tok::RBracket)?;
-                e = Expr::Index { target: Box::new(e), index: Box::new(idx) };
+                e = Expr::Index {
+                    target: Box::new(e),
+                    index: Box::new(idx),
+                };
                 continue;
             }
 
@@ -892,7 +978,10 @@ impl Parser {
     }
 
     fn peek_binop(&self) -> Option<(BinOp, u8)> {
-        if let Some(Token { kind: Tok::Op(op), .. }) = self.t.get(self.i) {
+        if let Some(Token {
+            kind: Tok::Op(op), ..
+        }) = self.t.get(self.i)
+        {
             let (b, p) = match op.as_str() {
                 "==" => (BinOp::Eq, 2),
                 "!=" => (BinOp::Ne, 2),
@@ -929,7 +1018,10 @@ impl Parser {
         self.peek().map(|t| &t.kind == k).unwrap_or(false)
     }
     fn peek_n_is(&self, n: usize, k: &Tok) -> bool {
-        self.t.get(self.i + n).map(|t| &t.kind == k).unwrap_or(false)
+        self.t
+            .get(self.i + n)
+            .map(|t| &t.kind == k)
+            .unwrap_or(false)
     }
     fn peek_op(&self, s: &str) -> bool {
         matches!(self.peek(), Some(Token { kind: Tok::Op(op), .. }) if op == s)
@@ -970,8 +1062,14 @@ impl Parser {
     }
     fn peek_ident_string(&self) -> Option<String> {
         match self.peek() {
-            Some(Token { kind: Tok::Ident(s), .. }) => Some(s.clone()),
-            Some(Token { kind: Tok::Keyword(s), .. }) => Some(s.clone()),
+            Some(Token {
+                kind: Tok::Ident(s),
+                ..
+            }) => Some(s.clone()),
+            Some(Token {
+                kind: Tok::Keyword(s),
+                ..
+            }) => Some(s.clone()),
             _ => None,
         }
     }
@@ -982,10 +1080,18 @@ impl Parser {
     }
     fn err_here(&self, msg: &str) -> RelayError {
         let (line, col) = self.peek().map(|t| (t.line, t.col)).unwrap_or((0, 0));
-        RelayError::Syntax { msg: msg.into(), line, col }
+        RelayError::Syntax {
+            msg: msg.into(),
+            line,
+            col,
+        }
     }
     fn err_at(&self, line: usize, col: usize, msg: &str) -> RelayError {
-        RelayError::Syntax { msg: msg.into(), line, col }
+        RelayError::Syntax {
+            msg: msg.into(),
+            line,
+            col,
+        }
     }
 }
 
@@ -1024,6 +1130,8 @@ struct Response {
     status: u16,
     content_type: String,
     body: Vec<u8>,
+    headers: HashMap<String, String>,
+    set_cookies: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -1054,14 +1162,19 @@ struct Deferred {
 }
 impl Deferred {
     fn new(f: BoxFut) -> Self {
-        Self { fut: tokio::sync::Mutex::new(Some(f)), cached: tokio::sync::Mutex::new(None) }
+        Self {
+            fut: tokio::sync::Mutex::new(Some(f)),
+            cached: tokio::sync::Mutex::new(None),
+        }
     }
     async fn resolve(&self) -> RResult<Value> {
         if let Some(v) = self.cached.lock().await.clone() {
             return Ok(v);
         }
         let mut g = self.fut.lock().await;
-        let f = g.take().ok_or_else(|| RelayError::Runtime("Deferred already taken".into()))?;
+        let f = g
+            .take()
+            .ok_or_else(|| RelayError::Runtime("Deferred already taken".into()))?;
         drop(g);
         let v = f.await?;
         *self.cached.lock().await = Some(v.clone());
@@ -1074,16 +1187,20 @@ struct TaskHandle {
 }
 impl TaskHandle {
     fn new(j: tokio::task::JoinHandle<RResult<Value>>) -> Self {
-        Self { join: tokio::sync::Mutex::new(Some(j)) }
+        Self {
+            join: tokio::sync::Mutex::new(Some(j)),
+        }
     }
     async fn join(&self) -> RResult<Value> {
         let mut g = self.join.lock().await;
-        let h = g.take().ok_or_else(|| RelayError::Runtime("Task already joined".into()))?;
+        let h = g
+            .take()
+            .ok_or_else(|| RelayError::Runtime("Task already joined".into()))?;
         drop(g);
-        h.await.map_err(|e| RelayError::Runtime(format!("Task join error: {e}")))?
+        h.await
+            .map_err(|e| RelayError::Runtime(format!("Task join error: {e}")))?
     }
 }
-
 
 // A Thunk is an unevaluated expression captured for delayed execution (used by schedulers like sleep/timeout).
 struct Thunk {
@@ -1095,7 +1212,9 @@ impl Thunk {
         Self { expr, env }
     }
     async fn run(&self) -> RResult<Value> {
-        let ev = Evaluator { env: self.env.clone() };
+        let ev = Evaluator {
+            env: self.env.clone(),
+        };
         ev.eval_expr(&self.expr).await
     }
 }
@@ -1120,12 +1239,25 @@ impl Value {
         match self {
             Value::Int(n) => n.to_string(),
             Value::Float(f) => f.to_string(),
-            Value::Bool(b) => if *b { "True".into() } else { "False".into() },
+            Value::Bool(b) => {
+                if *b {
+                    "True".into()
+                } else {
+                    "False".into()
+                }
+            }
             Value::Str(s) => s.clone(),
             Value::None => "None".into(),
-            Value::List(v) => format!("[{}]", v.iter().map(|x| x.repr()).collect::<Vec<_>>().join(", ")),
+            Value::List(v) => format!(
+                "[{}]",
+                v.iter().map(|x| x.repr()).collect::<Vec<_>>().join(", ")
+            ),
             Value::Dict(m) => {
-                let pairs = m.iter().map(|(k, v)| format!("{k}: {}", v.repr())).collect::<Vec<_>>().join(", ");
+                let pairs = m
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {}", v.repr()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("{{{pairs}}}")
             }
             Value::Json(j) => j.to_string(),
@@ -1149,7 +1281,9 @@ struct Env {
 }
 impl Env {
     fn new_global() -> Self {
-        Self { scopes: vec![HashMap::new()] }
+        Self {
+            scopes: vec![HashMap::new()],
+        }
     }
     fn push(&mut self) {
         self.scopes.push(HashMap::new());
@@ -1278,27 +1412,30 @@ impl Evaluator {
     #[async_recursion]
     async fn eval_stmt(&self, s: &Stmt) -> RResult<Flow> {
         match s {
-            
-Stmt::Expr(e) => {
-    let v = self.eval_expr(e).await?;
+            Stmt::Expr(e) => {
+                let v = self.eval_expr(e).await?;
 
-    // Non-blocking: expression statements never wait.
-    // If the result is Deferred/Task, run it in the background and keep the process alive.
-    match v {
-        Value::Deferred(d) => {
-            let h = tokio::spawn(async move { let _ = d.resolve().await; });
-            track_bg(h).await;
-        }
-        Value::Task(t) => {
-            let h = tokio::spawn(async move { let _ = t.join().await; });
-            track_bg(h).await;
-        }
-        _ => {}
-    }
+                // Non-blocking: expression statements never wait.
+                // If the result is Deferred/Task, run it in the background and keep the process alive.
+                match v {
+                    Value::Deferred(d) => {
+                        let h = tokio::spawn(async move {
+                            let _ = d.resolve().await;
+                        });
+                        track_bg(h).await;
+                    }
+                    Value::Task(t) => {
+                        let h = tokio::spawn(async move {
+                            let _ = t.join().await;
+                        });
+                        track_bg(h).await;
+                    }
+                    _ => {}
+                }
 
-    Ok(Flow::None)
-}
-                        Stmt::Assign { name, expr } => {
+                Ok(Flow::None)
+            }
+            Stmt::Assign { name, expr } => {
                 let v = self.eval_expr(expr).await?;
                 let mut env = self.env.lock().await;
                 if !env.assign_existing(name, v.clone()) {
@@ -1307,7 +1444,9 @@ Stmt::Expr(e) => {
                 Ok(Flow::None)
             }
             Stmt::AugAssign { name, op, expr } => {
-                let rhs = self.resolve_deferred_only(self.eval_expr(expr).await?).await?;
+                let rhs = self
+                    .resolve_deferred_only(self.eval_expr(expr).await?)
+                    .await?;
                 let env = self.env.lock().await;
                 let cur = env.get(name)?;
                 drop(env);
@@ -1330,12 +1469,20 @@ Stmt::Expr(e) => {
                 };
                 Ok(Flow::Return(v))
             }
-            Stmt::If { cond, then_block, else_block } => {
+            Stmt::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
                 let c = self.resolve_if_needed(self.eval_expr(cond).await?).await?;
                 let mut env = self.env.lock().await;
                 env.push();
                 drop(env);
-                let r = if c.truthy() { self.eval_block(then_block).await? } else { self.eval_block(else_block).await? };
+                let r = if c.truthy() {
+                    self.eval_block(then_block).await?
+                } else {
+                    self.eval_block(else_block).await?
+                };
                 let mut env = self.env.lock().await;
                 env.pop();
                 Ok(r)
@@ -1365,7 +1512,11 @@ Stmt::Expr(e) => {
                     Value::List(v) => v,
                     Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
                     Value::Dict(m) => m.keys().map(|k| Value::Str(k.clone())).collect(),
-                    _ => return Err(RelayError::Type("for(each in iterable) expects list/string/dict".into())),
+                    _ => {
+                        return Err(RelayError::Type(
+                            "for(each in iterable) expects list/string/dict".into(),
+                        ))
+                    }
                 };
 
                 for item in items {
@@ -1383,7 +1534,12 @@ Stmt::Expr(e) => {
                 }
                 Ok(Flow::None)
             }
-            Stmt::FuncDef { name, params, body, decorators } => {
+            Stmt::FuncDef {
+                name,
+                params,
+                body,
+                decorators,
+            } => {
                 let f = UserFunction {
                     name: name.clone(),
                     params: params.clone(),
@@ -1448,54 +1604,80 @@ Stmt::Expr(e) => {
             }
 
             Expr::Index { target, index } => {
-                let t = self.resolve_if_needed(self.eval_expr(target).await?).await?;
+                let t = self
+                    .resolve_if_needed(self.eval_expr(target).await?)
+                    .await?;
                 let idx = self.resolve_if_needed(self.eval_expr(index).await?).await?;
                 match (t, idx) {
-                    (Value::List(v), Value::Int(i)) => v.get(i as usize).cloned().ok_or_else(|| RelayError::Runtime("Index out of range".into())),
-                    (Value::Str(s), Value::Int(i)) => s.chars().nth(i as usize).map(|c| Value::Str(c.to_string())).ok_or_else(|| RelayError::Runtime("Index out of range".into())),
-                    (Value::Dict(m), k) => m.get(&k.repr()).cloned().ok_or_else(|| RelayError::Runtime("Key not found".into())),
+                    (Value::List(v), Value::Int(i)) => v
+                        .get(i as usize)
+                        .cloned()
+                        .ok_or_else(|| RelayError::Runtime("Index out of range".into())),
+                    (Value::Str(s), Value::Int(i)) => s
+                        .chars()
+                        .nth(i as usize)
+                        .map(|c| Value::Str(c.to_string()))
+                        .ok_or_else(|| RelayError::Runtime("Index out of range".into())),
+                    (Value::Dict(m), k) => m
+                        .get(&k.repr())
+                        .cloned()
+                        .ok_or_else(|| RelayError::Runtime("Key not found".into())),
                     (Value::Json(j), Value::Str(k)) => Ok(match j.get(&k) {
                         Some(v) => Value::Json(v.clone()),
                         None => return Err(RelayError::Runtime("Key not found".into())),
                     }),
-                    _ => Err(RelayError::Type("Indexing expects list/string/dict/json".into())),
+                    _ => Err(RelayError::Type(
+                        "Indexing expects list/string/dict/json".into(),
+                    )),
                 }
             }
 
-            Expr::Call { callee, args, kwargs } => {
+            Expr::Call {
+                callee,
+                args,
+                kwargs,
+            } => {
                 // callee can be Member(...) which may return a bound method
                 // IMPORTANT: spawn(expr) must receive raw (unresolved) values so it can run them concurrently
                 let is_spawn_ident = matches!(&**callee, Expr::Ident(name) if name == "spawn");
                 let is_sleep_ident = matches!(&**callee, Expr::Ident(name) if name == "sleep");
                 let is_print_ident = matches!(&**callee, Expr::Ident(name) if name == "print");
 
-                let c = self.resolve_deferred_only(self.eval_expr(callee).await?).await?;
+                let c = self
+                    .resolve_deferred_only(self.eval_expr(callee).await?)
+                    .await?;
 
-                
-// args
-let mut a = Vec::new();
-for (idx, x) in args.iter().enumerate() {
-    if (is_sleep_ident && idx == 1) || is_print_ident {
-        // Pass unevaluated expression as a thunk (evaluated after delay or in print)
-        let env = self.snapshot_env().await;
-        a.push(Value::Thunk(Arc::new(Thunk::new(x.clone(), env))));
-        continue;
-    }
-    let v = self.eval_expr(x).await?;
-    let v = if is_spawn_ident { v } else { self.resolve_deferred_only(v).await? };
-    a.push(v);
-}
+                // args
+                let mut a = Vec::new();
+                for (idx, x) in args.iter().enumerate() {
+                    if (is_sleep_ident && idx == 1) || is_print_ident {
+                        // Pass unevaluated expression as a thunk (evaluated after delay or in print)
+                        let env = self.snapshot_env().await;
+                        a.push(Value::Thunk(Arc::new(Thunk::new(x.clone(), env))));
+                        continue;
+                    }
+                    let v = self.eval_expr(x).await?;
+                    let v = if is_spawn_ident {
+                        v
+                    } else {
+                        self.resolve_deferred_only(v).await?
+                    };
+                    a.push(v);
+                }
 
                 // kwargs
                 let mut kw = Vec::new();
                 for (k, x) in kwargs {
                     let v = self.eval_expr(x).await?;
-                    let v = if is_spawn_ident { v } else { self.resolve_deferred_only(v).await? };
+                    let v = if is_spawn_ident {
+                        v
+                    } else {
+                        self.resolve_deferred_only(v).await?
+                    };
                     kw.push((k.clone(), v));
                 }
 
                 self.call_value(c, a, kw).await
-
             }
 
             Expr::BinOp { left, op, right } => {
@@ -1533,7 +1715,12 @@ for (idx, x) in args.iter().enumerate() {
         }
     }
 
-    async fn call_value(&self, callee: Value, args: Vec<Value>, kwargs: Vec<(String, Value)>) -> RResult<Value> {
+    async fn call_value(
+        &self,
+        callee: Value,
+        args: Vec<Value>,
+        kwargs: Vec<(String, Value)>,
+    ) -> RResult<Value> {
         match callee {
             Value::Builtin(f) => (f)(args, kwargs).await,
             Value::Function(f) => self.call_user_fn(&f, args, kwargs).await,
@@ -1543,7 +1730,12 @@ for (idx, x) in args.iter().enumerate() {
         }
     }
 
-    async fn call_user_fn(&self, f: &UserFunction, args: Vec<Value>, kwargs: Vec<(String, Value)>) -> RResult<Value> {
+    async fn call_user_fn(
+        &self,
+        f: &UserFunction,
+        args: Vec<Value>,
+        kwargs: Vec<(String, Value)>,
+    ) -> RResult<Value> {
         // bind positional + kwargs + defaults
         let mut bound: HashMap<String, Value> = HashMap::new();
 
@@ -1558,7 +1750,10 @@ for (idx, x) in args.iter().enumerate() {
         for p in &f.params {
             if !bound.contains_key(&p.name) {
                 if let Some(def) = &p.default {
-                    bound.insert(p.name.clone(), self.resolve_if_needed(self.eval_expr(def).await?).await?);
+                    bound.insert(
+                        p.name.clone(),
+                        self.resolve_if_needed(self.eval_expr(def).await?).await?,
+                    );
                 } else {
                     bound.insert(p.name.clone(), Value::None);
                 }
@@ -1618,33 +1813,37 @@ for (idx, x) in args.iter().enumerate() {
                 }
             }
 
-            Value::Deferred(d) => {
-                match name {
-                    "join" | "resolve" => {
-                        let d0 = d.clone();
-                        Ok(Value::Builtin(Arc::new(move |_args, _kwargs| {
-                            let d0 = d0.clone();
-                            Box::pin(async move {
-                                let d2 = Deferred::new(Box::pin(async move {
-                                    let v = d0.resolve().await?;
-                                    Ok(v)
-                                }));
-                                Ok(Value::Deferred(Arc::new(d2)))
-                            })
-                        })))
-                    }
-                    _ => Ok(Value::None),
+            Value::Deferred(d) => match name {
+                "join" | "resolve" => {
+                    let d0 = d.clone();
+                    Ok(Value::Builtin(Arc::new(move |_args, _kwargs| {
+                        let d0 = d0.clone();
+                        Box::pin(async move {
+                            let d2 = Deferred::new(Box::pin(async move {
+                                let v = d0.resolve().await?;
+                                Ok(v)
+                            }));
+                            Ok(Value::Deferred(Arc::new(d2)))
+                        })
+                    })))
                 }
-            }
+                _ => Ok(Value::None),
+            },
 
             Value::Dict(m) => Ok(m.get(name).cloned().unwrap_or(Value::None)),
             Value::Json(j) => Ok(j.get(name).cloned().map(Value::Json).unwrap_or(Value::None)),
 
-            _ => Err(RelayError::Type("Member access expects object/dict/json/task/deferred".into())),
+            _ => Err(RelayError::Type(
+                "Member access expects object/dict/json/task/deferred".into(),
+            )),
         }
     }
 
-    async fn register_decorators_for_fn(&self, fn_name: &str, decorators: &[Decorator]) -> RResult<()> {
+    async fn register_decorators_for_fn(
+        &self,
+        fn_name: &str,
+        decorators: &[Decorator],
+    ) -> RResult<()> {
         for d in decorators {
             match d {
                 Decorator::Route { base, method, path } => {
@@ -1661,8 +1860,8 @@ for (idx, x) in args.iter().enumerate() {
                         }
                         _ => {
                             return Err(RelayError::Type(format!(
-                                "@{base}.* expects `{base}` to be a WebApp (preferred) or Route handle"
-                            )))
+                            "@{base}.* expects `{base}` to be a WebApp (preferred) or Route handle"
+                        )))
                         }
                     }
                 }
@@ -1678,13 +1877,21 @@ fn coerce_param_type(ty: &str, v: Value) -> RResult<Value> {
         "int" => match v {
             Value::Int(n) => Ok(Value::Int(n)),
             Value::Float(f) => Ok(Value::Int(f as i64)),
-            Value::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| RelayError::Type("Bad int".into())),
+            Value::Str(s) => s
+                .trim()
+                .parse::<i64>()
+                .map(Value::Int)
+                .map_err(|_| RelayError::Type("Bad int".into())),
             _ => Err(RelayError::Type("Bad int".into())),
         },
         "float" => match v {
             Value::Float(f) => Ok(Value::Float(f)),
             Value::Int(n) => Ok(Value::Float(n as f64)),
-            Value::Str(s) => s.trim().parse::<f64>().map(Value::Float).map_err(|_| RelayError::Type("Bad float".into())),
+            Value::Str(s) => s
+                .trim()
+                .parse::<f64>()
+                .map(Value::Float)
+                .map_err(|_| RelayError::Type("Bad float".into())),
             _ => Err(RelayError::Type("Bad float".into())),
         },
         "Json" | "json" => match v {
@@ -1696,7 +1903,9 @@ fn coerce_param_type(ty: &str, v: Value) -> RResult<Value> {
                 }
                 Ok(Value::Json(J::Object(obj)))
             }
-            Value::Str(s) => serde_json::from_str::<J>(&s).map(Value::Json).map_err(|_| RelayError::Type("Bad Json".into())),
+            Value::Str(s) => serde_json::from_str::<J>(&s)
+                .map(Value::Json)
+                .map_err(|_| RelayError::Type("Bad Json".into())),
             _ => Err(RelayError::Type("Bad Json".into())),
         },
         _ => Ok(v),
@@ -1773,7 +1982,9 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
         "print",
         Value::Builtin(Arc::new(|args, _| {
             Box::pin(async move {
-                let needs_async = args.iter().any(|v| matches!(v, Value::Thunk(_) | Value::Deferred(_) | Value::Task(_)));
+                let needs_async = args
+                    .iter()
+                    .any(|v| matches!(v, Value::Thunk(_) | Value::Deferred(_) | Value::Task(_)));
                 if needs_async {
                     let d = Deferred::new(Box::pin(async move {
                         let mut out = Vec::new();
@@ -1791,12 +2002,18 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
                             };
                             out.push(resolved);
                         }
-                        println!("{}", out.iter().map(|v| v.repr()).collect::<Vec<_>>().join(" "));
+                        println!(
+                            "{}",
+                            out.iter().map(|v| v.repr()).collect::<Vec<_>>().join(" ")
+                        );
                         Ok(Value::None)
                     }));
                     Ok(Value::Deferred(Arc::new(d)))
                 } else {
-                    println!("{}", args.iter().map(|v| v.repr()).collect::<Vec<_>>().join(" "));
+                    println!(
+                        "{}",
+                        args.iter().map(|v| v.repr()).collect::<Vec<_>>().join(" ")
+                    );
                     Ok(Value::None)
                 }
             })
@@ -1806,7 +2023,13 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
     // converters: str/int/float
     env.set(
         "str",
-        Value::Builtin(Arc::new(|args, _| Box::pin(async move { Ok(Value::Str(args.get(0).cloned().unwrap_or(Value::None).repr())) }))),
+        Value::Builtin(Arc::new(|args, _| {
+            Box::pin(async move {
+                Ok(Value::Str(
+                    args.get(0).cloned().unwrap_or(Value::None).repr(),
+                ))
+            })
+        })),
     );
     env.set(
         "int",
@@ -1827,53 +2050,52 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
         })),
     );
 
-    
-// sleep(ms, value=None) -> Deferred
-// Non-blocking scheduler primitive:
-// - returns immediately with a Deferred
-// - after ms, evaluates/resolves the 2nd argument (Thunk/Deferred/Task/callable/value)
-// - prints non-None result and resolves to it
-env.set(
-    "sleep",
-    Value::Builtin(Arc::new(|args, _| {
-        Box::pin(async move {
-            let ms = expect_int(&args, 0, "sleep(ms, value?)")? as u64;
-            let value = args.get(1).cloned().unwrap_or(Value::None);
+    // sleep(ms, value=None) -> Deferred
+    // Non-blocking scheduler primitive:
+    // - returns immediately with a Deferred
+    // - after ms, evaluates/resolves the 2nd argument (Thunk/Deferred/Task/callable/value)
+    // - prints non-None result and resolves to it
+    env.set(
+        "sleep",
+        Value::Builtin(Arc::new(|args, _| {
+            Box::pin(async move {
+                let ms = expect_int(&args, 0, "sleep(ms, value?)")? as u64;
+                let value = args.get(1).cloned().unwrap_or(Value::None);
 
-            let d = Deferred::new(Box::pin(async move {
-                tokio::time::sleep(Duration::from_millis(ms)).await;
+                let d = Deferred::new(Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
 
-                // Evaluate/resolve after delay
-                let mut out = match value {
-                    Value::Thunk(t) => t.run().await?,
-                    Value::Deferred(d) => d.resolve().await?,
-                    Value::Task(t) => t.join().await?,
-                    Value::Builtin(f) => (f)(vec![], vec![]).await?, // sleep(ms, fn)
-                    Value::Function(f) => {
-                        // call user fn with no args after delay
-                        // we cannot access evaluator here, so return the function itself;
-                        // if you want sleep(ms, user_fn) to call it, wrap as sleep(ms, spawn(user_fn()))
-                        Value::Function(f)
+                    // Evaluate/resolve after delay
+                    let mut out = match value {
+                        Value::Thunk(t) => t.run().await?,
+                        Value::Deferred(d) => d.resolve().await?,
+                        Value::Task(t) => t.join().await?,
+                        Value::Builtin(f) => (f)(vec![], vec![]).await?, // sleep(ms, fn)
+                        Value::Function(f) => {
+                            // call user fn with no args after delay
+                            // we cannot access evaluator here, so return the function itself;
+                            // if you want sleep(ms, user_fn) to call it, wrap as sleep(ms, spawn(user_fn()))
+                            Value::Function(f)
+                        }
+                        v => v,
+                    };
+
+                    // If evaluation yielded Deferred/Task, resolve now
+                    out = match out {
+                        Value::Deferred(d) => d.resolve().await?,
+                        Value::Task(t) => t.join().await?,
+                        v => v,
+                    };
+
+                    if !out.is_none() {
+                        println!("{}", out.repr());
                     }
-                    v => v,
-                };
-
-                // If evaluation yielded Deferred/Task, resolve now
-                out = match out {
-                    Value::Deferred(d) => d.resolve().await?,
-                    Value::Task(t) => t.join().await?,
-                    v => v,
-                };
-
-                if !out.is_none() {
-                    println!("{}", out.repr());
-                }
-                Ok(out)
-            }));
-            Ok(Value::Deferred(Arc::new(d)))
-        })
-    })),
-);
+                    Ok(out)
+                }));
+                Ok(Value::Deferred(Arc::new(d)))
+            })
+        })),
+    );
     // timeout(expr, ms)
     env.set(
         "timeout",
@@ -1925,7 +2147,9 @@ env.set(
                 let text = expect_str(&args, 0, "save_file(text, path)")?;
                 let path = expect_str(&args, 1, "save_file(text, path)")?;
                 let d = Deferred::new(Box::pin(async move {
-                    tokio::fs::write(path, text).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                    tokio::fs::write(path, text)
+                        .await
+                        .map_err(|e| RelayError::Runtime(e.to_string()))?;
                     Ok(Value::None)
                 }));
                 Ok(Value::Deferred(Arc::new(d)))
@@ -1943,7 +2167,8 @@ env.set(
                     let s = tokio::fs::read_to_string(path)
                         .await
                         .map_err(|e| RelayError::Runtime(e.to_string()))?;
-                    let j: J = serde_json::from_str(&s).map_err(|e| RelayError::Runtime(e.to_string()))?;
+                    let j: J =
+                        serde_json::from_str(&s).map_err(|e| RelayError::Runtime(e.to_string()))?;
                     Ok(Value::Json(j))
                 }));
                 Ok(Value::Deferred(Arc::new(d)))
@@ -1954,7 +2179,10 @@ env.set(
         "save_json",
         Value::Builtin(Arc::new(|args, _| {
             Box::pin(async move {
-                let val = args.get(0).cloned().ok_or_else(|| RelayError::Type("save_json(data, path) missing data".into()))?;
+                let val = args
+                    .get(0)
+                    .cloned()
+                    .ok_or_else(|| RelayError::Type("save_json(data, path) missing data".into()))?;
                 let path = expect_str(&args, 1, "save_json(data, path)")?;
                 let d = Deferred::new(Box::pin(async move {
                     let j = match val {
@@ -1969,8 +2197,11 @@ env.set(
                         Value::Str(s) => serde_json::from_str::<J>(&s).unwrap_or(J::String(s)),
                         other => J::String(other.repr()),
                     };
-                    let s = serde_json::to_string_pretty(&j).map_err(|e| RelayError::Runtime(e.to_string()))?;
-                    tokio::fs::write(path, s).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                    let s = serde_json::to_string_pretty(&j)
+                        .map_err(|e| RelayError::Runtime(e.to_string()))?;
+                    tokio::fs::write(path, s)
+                        .await
+                        .map_err(|e| RelayError::Runtime(e.to_string()))?;
                     Ok(Value::None)
                 }));
                 Ok(Value::Deferred(Arc::new(d)))
@@ -2062,7 +2293,9 @@ env.set(
                     }
                     match join_set.join_next().await {
                         Some(r) => r.map_err(|e| RelayError::Runtime(e.to_string()))?,
-                        None => Err(RelayError::Runtime("race([..]) expects at least one task".into())),
+                        None => Err(RelayError::Runtime(
+                            "race([..]) expects at least one task".into(),
+                        )),
                     }
                 }));
                 Ok(Value::Deferred(Arc::new(d)))
@@ -2075,7 +2308,11 @@ env.set(
         "Response",
         Value::Builtin(Arc::new(|args, kwargs| {
             Box::pin(async move {
-                let status = kwargs.iter().find(|(k, _)| k == "status").map(|(_, v)| v.clone()).unwrap_or(Value::Int(200));
+                let status = kwargs
+                    .iter()
+                    .find(|(k, _)| k == "status")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or(Value::Int(200));
                 let ct = kwargs
                     .iter()
                     .find(|(k, _)| k == "content_type")
@@ -2096,26 +2333,37 @@ env.set(
                     Value::Json(j) => j.to_string().into_bytes(),
                     v => v.repr().into_bytes(),
                 };
-                Ok(Value::Response(Response { status, content_type: ct, body: bytes }))
+                Ok(Value::Response(Response {
+                    status,
+                    content_type: ct,
+                    body: bytes,
+                    headers: HashMap::new(),
+                    set_cookies: vec![],
+                }))
             })
         })),
     );
 
     // Web framework
-    // WebServer is a singleton "type" object in v0.1: use WebServer.run(app)
     env.set(
         "WebServer",
-        Value::Obj(Object::WebServer(WebServerHandle::new())),
+        Value::Builtin(Arc::new(|_args, _| {
+            Box::pin(async move { Ok(Value::Obj(Object::WebServer(WebServerHandle::new()))) })
+        })),
     );
     env.set(
         "WebApp",
-        Value::Builtin(Arc::new(|_args, _| Box::pin(async move { Ok(Value::Obj(Object::WebApp(WebAppHandle::new()))) }))),
+        Value::Builtin(Arc::new(|_args, _| {
+            Box::pin(async move { Ok(Value::Obj(Object::WebApp(WebAppHandle::new()))) })
+        })),
     );
 
     // HTTP client
     env.set(
         "Http",
-        Value::Builtin(Arc::new(|_args, _| Box::pin(async move { Ok(Value::Obj(Object::Http(HttpHandle::new()))) }))),
+        Value::Builtin(Arc::new(|_args, _| {
+            Box::pin(async move { Ok(Value::Obj(Object::Http(HttpHandle::new()))) })
+        })),
     );
 
     // MongoDB client
@@ -2125,8 +2373,12 @@ env.set(
             Box::pin(async move {
                 let uri = expect_str(&args, 0, "Mongo(uri)")?;
                 let d = Deferred::new(Box::pin(async move {
-                    let client = MongoClient::with_uri_str(uri).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
-                    Ok(Value::Obj(Object::MongoClient(MongoClientHandle::new(client))))
+                    let client = MongoClient::with_uri_str(uri)
+                        .await
+                        .map_err(|e| RelayError::Runtime(e.to_string()))?;
+                    Ok(Value::Obj(Object::MongoClient(MongoClientHandle::new(
+                        client,
+                    ))))
                 }));
                 Ok(Value::Deferred(Arc::new(d)))
             })
@@ -2135,9 +2387,9 @@ env.set(
 
     // Hook global callback for web requests -> interpreter calls
     // We call handler by name and inject params (Path > Body > Query)
-    set_global_callback(Arc::new(move |fn_name, req| {
+    set_global_callback(Arc::new(move |app, fn_name, req| {
         let ev = evaluator.clone();
-        Box::pin(async move { ev.call_web_handler(&fn_name, req).await })
+        Box::pin(async move { ev.call_web_handler(app, &fn_name, req).await })
     }));
 
     Ok(())
@@ -2154,7 +2406,10 @@ fn expect_int(args: &[Value], i: usize, sig: &str) -> RResult<i64> {
     match args.get(i) {
         Some(Value::Int(n)) => Ok(*n),
         Some(Value::Float(f)) => Ok(*f as i64),
-        Some(Value::Str(s)) => s.trim().parse().map_err(|_| RelayError::Type(format!("{sig} expects int"))),
+        Some(Value::Str(s)) => s
+            .trim()
+            .parse()
+            .map_err(|_| RelayError::Type(format!("{sig} expects int"))),
         _ => Err(RelayError::Type(format!("{sig} expects int"))),
     }
 }
@@ -2172,7 +2427,9 @@ fn value_to_json(v: &Value) -> J {
         Value::List(vs) => J::Array(vs.iter().map(value_to_json).collect()),
         Value::Str(s) => J::String(s.clone()),
         Value::Int(n) => J::Number((*n).into()),
-        Value::Float(f) => serde_json::Number::from_f64(*f).map(J::Number).unwrap_or(J::Null),
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(J::Number)
+            .unwrap_or(J::Null),
         Value::Bool(b) => J::Bool(*b),
         Value::None => J::Null,
         Value::Bytes(b) => J::String(format!("<bytes {}>", b.len())),
@@ -2183,8 +2440,12 @@ fn value_to_json(v: &Value) -> J {
 fn value_to_document(v: Value, sig: &str) -> RResult<Document> {
     let json = value_to_json(&v);
     match json {
-        J::Object(_) => bson::to_document(&json).map_err(|e| RelayError::Runtime(format!("{sig}: {e}"))),
-        _ => Err(RelayError::Type(format!("{sig} expects a dict/json object"))),
+        J::Object(_) => {
+            bson::to_document(&json).map_err(|e| RelayError::Runtime(format!("{sig}: {e}")))
+        }
+        _ => Err(RelayError::Type(format!(
+            "{sig} expects a dict/json object"
+        ))),
     }
 }
 
@@ -2208,6 +2469,7 @@ struct WebServerHandle;
 #[derive(Default)]
 struct AppState {
     routes: Vec<RouteSpec>,
+    sessions: HashMap<String, IndexMap<String, Value>>,
 }
 #[derive(Clone)]
 struct RouteSpec {
@@ -2223,7 +2485,9 @@ impl WebServerHandle {
 }
 impl WebAppHandle {
     fn new() -> Self {
-        Self { inner: Arc::new(Mutex::new(AppState::default())) }
+        Self {
+            inner: Arc::new(Mutex::new(AppState::default())),
+        }
     }
 
     // Back-compat: route handle style (route = app.route(); @route.get("/"))
@@ -2234,26 +2498,48 @@ impl WebAppHandle {
     // New spec: decorator attaches directly to the app: @app.get("/"), @app.post("/")
     fn register(&self, method: String, path: String, fn_name: String) {
         let mut st = self.inner.lock().unwrap();
-        st.routes.push(RouteSpec { method, path, fn_name });
+        st.routes.push(RouteSpec {
+            method,
+            path,
+            fn_name,
+        });
+    }
+
+    fn get_session(&self, sid: &str) -> IndexMap<String, Value> {
+        let st = self.inner.lock().unwrap();
+        st.sessions.get(sid).cloned().unwrap_or_default()
+    }
+
+    fn put_session(&self, sid: String, data: IndexMap<String, Value>) {
+        let mut st = self.inner.lock().unwrap();
+        st.sessions.insert(sid, data);
     }
 }
 impl RouteHandle {
     fn register(&self, method: String, path: String, fn_name: String) {
         let mut st = self.app.inner.lock().unwrap();
-        st.routes.push(RouteSpec { method, path, fn_name });
+        st.routes.push(RouteSpec {
+            method,
+            path,
+            fn_name,
+        });
     }
 }
 
 // Callback from Axum -> interpreter
 #[derive(Clone)]
 struct RequestParts {
+    method: String,
+    path: String,
     path_params: HashMap<String, String>,
     query: HashMap<String, String>,
     json: Option<J>,
     headers: HashMap<String, String>,
+    cookies: HashMap<String, String>,
+    session_id: Option<String>,
 }
 
-type HandlerCb = Arc<dyn Fn(String, RequestParts) -> BoxFut + Send + Sync>;
+type HandlerCb = Arc<dyn Fn(WebAppHandle, String, RequestParts) -> BoxFut + Send + Sync>;
 static GLOBAL_CB: OnceLock<HandlerCb> = OnceLock::new();
 
 static BG_TASKS: OnceLock<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> = OnceLock::new();
@@ -2278,7 +2564,6 @@ async fn drain_bg() {
     }
 }
 
-
 fn set_global_callback(cb: HandlerCb) {
     let _ = GLOBAL_CB.set(cb);
 }
@@ -2295,15 +2580,18 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
         let method = r.method.to_lowercase();
         let path = relay_path_to_axum(&r.path);
         let fn_name = r.fn_name.clone();
+        let route_path = r.path.clone();
+        let app_handle = app.clone();
 
         // define handler in THIS scope so `get(handler)` / `post(handler)` can see it
-        let handler = move |
-            Path(ax_path): Path<HashMap<String, String>>,
-            Query(q): Query<HashMap<String, String>>,
-            headers: HeaderMap,
-            body: Option<AxumJson<J>>
-        | {
+        let handler = move |method: Method,
+                            Path(ax_path): Path<HashMap<String, String>>,
+                            Query(q): Query<HashMap<String, String>>,
+                            headers: HeaderMap,
+                            body: Option<AxumJson<J>>| {
             let fn_name = fn_name.clone();
+            let route_path = route_path.clone();
+            let app_handle = app_handle.clone();
             async move {
                 let mut h = HashMap::new();
                 for (k, v) in headers.iter() {
@@ -2311,18 +2599,28 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                         h.insert(k.to_string(), s.to_string());
                     }
                 }
+                let cookies = parse_cookie_header(h.get("cookie").cloned());
+                let session_id = cookies.get("relay_sid").cloned();
 
                 let req = RequestParts {
+                    method: method.to_string(),
+                    path: route_path,
                     path_params: ax_path,
                     query: q,
                     json: body.map(|b| b.0),
                     headers: h,
+                    cookies,
+                    session_id,
                 };
 
-                let cb = get_global_callback()
-                    .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "No relay callback".to_string()))?;
+                let cb = get_global_callback().ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "No relay callback".to_string(),
+                    )
+                })?;
 
-                let v = cb(fn_name, req)
+                let v = cb(app_handle, fn_name, req)
                     .await
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2333,7 +2631,14 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
         router = match method.as_str() {
             "get" => router.route(&path, get(handler)),
             "post" => router.route(&path, post(handler)),
-            _ => return Err(RelayError::Runtime("Only GET/POST supported in v0.1".into())),
+            "put" => router.route(&path, axum::routing::put(handler)),
+            "patch" => router.route(&path, axum::routing::patch(handler)),
+            "delete" => router.route(&path, axum::routing::delete(handler)),
+            _ => {
+                return Err(RelayError::Runtime(format!(
+                    "Unsupported HTTP method: {method}"
+                )))
+            }
         };
     }
 
@@ -2346,6 +2651,31 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
         .await
         .map_err(|e| RelayError::Runtime(e.to_string()))?;
     Ok(())
+}
+
+fn parse_cookie_header(raw: Option<String>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(v) = raw {
+        for seg in v.split(';') {
+            let part = seg.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if let Some((k, vv)) = part.split_once('=') {
+                out.insert(k.trim().to_string(), vv.trim().to_string());
+            }
+        }
+    }
+    out
+}
+
+fn new_session_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("rsid_{now:x}")
 }
 
 fn relay_path_to_axum(p: &str) -> String {
@@ -2372,29 +2702,94 @@ fn relay_path_to_axum(p: &str) -> String {
 async fn value_to_axum_response(v: Value) -> axum::response::Response {
     let r = match v {
         Value::Response(r) => r,
-        Value::Json(j) => Response { status: 200, content_type: "application/json".into(), body: j.to_string().into_bytes() },
+        Value::Json(j) => Response {
+            status: 200,
+            content_type: "application/json".into(),
+            body: j.to_string().into_bytes(),
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        },
         Value::Dict(m) => {
             // dict/list => JSON
             let mut obj = serde_json::Map::new();
             for (k, vv) in m {
                 obj.insert(k, J::String(vv.repr()));
             }
-            Response { status: 200, content_type: "application/json".into(), body: J::Object(obj).to_string().into_bytes() }
+            Response {
+                status: 200,
+                content_type: "application/json".into(),
+                body: J::Object(obj).to_string().into_bytes(),
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            }
         }
         Value::List(vs) => {
-            let arr = vs.into_iter().map(|x| J::String(x.repr())).collect::<Vec<_>>();
-            Response { status: 200, content_type: "application/json".into(), body: J::Array(arr).to_string().into_bytes() }
+            let arr = vs
+                .into_iter()
+                .map(|x| J::String(x.repr()))
+                .collect::<Vec<_>>();
+            Response {
+                status: 200,
+                content_type: "application/json".into(),
+                body: J::Array(arr).to_string().into_bytes(),
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            }
         }
-        Value::Bytes(b) => Response { status: 200, content_type: "application/octet-stream".into(), body: b },
+        Value::Bytes(b) => Response {
+            status: 200,
+            content_type: "application/octet-stream".into(),
+            body: b,
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        },
         Value::Str(s) => {
             // template rendering happens in handler; here pick content-type
-            let ct = if s.contains("<") || s.contains("{{") { "text/html; charset=utf-8" } else { "text/plain; charset=utf-8" };
-            Response { status: 200, content_type: ct.into(), body: s.into_bytes() }
+            let ct = if s.contains("<") || s.contains("{{") {
+                "text/html; charset=utf-8"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+            Response {
+                status: 200,
+                content_type: ct.into(),
+                body: s.into_bytes(),
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            }
         }
-        other => Response { status: 200, content_type: "text/plain; charset=utf-8".into(), body: other.repr().into_bytes() },
+        other => Response {
+            status: 200,
+            content_type: "text/plain; charset=utf-8".into(),
+            body: other.repr().into_bytes(),
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        },
     };
 
-    (StatusCode::from_u16(r.status).unwrap_or(StatusCode::OK), [(axum::http::header::CONTENT_TYPE, r.content_type)], r.body).into_response()
+    {
+        let mut resp = (
+            StatusCode::from_u16(r.status).unwrap_or(StatusCode::OK),
+            [(axum::http::header::CONTENT_TYPE, r.content_type)],
+            r.body,
+        )
+            .into_response();
+        for (k, v) in r.headers {
+            if let (Ok(hn), Ok(hv)) = (
+                axum::http::header::HeaderName::from_bytes(k.as_bytes()),
+                axum::http::header::HeaderValue::from_str(&v),
+            ) {
+                resp.headers_mut().insert(hn, hv);
+            }
+        }
+        for cookie in r.set_cookies {
+            if let Ok(hv) = axum::http::header::HeaderValue::from_str(&cookie) {
+                resp.headers_mut()
+                    .append(axum::http::header::SET_COOKIE, hv);
+            }
+        }
+        resp
+    }
 }
 
 // ========================= HTTP Client =========================
@@ -2405,7 +2800,9 @@ struct HttpHandle {
 }
 impl HttpHandle {
     fn new() -> Self {
-        Self { client: reqwest::Client::new() }
+        Self {
+            client: reqwest::Client::new(),
+        }
     }
     fn get_member(&self, name: &str) -> Value {
         // bound method: (args, kwargs) -> Deferred<HttpResponse>
@@ -2416,15 +2813,27 @@ impl HttpHandle {
                 Box::pin(async move {
                     let url = expect_str(&args, 0, "http.get(url)")?;
                     let d = Deferred::new(Box::pin(async move {
-                        let resp = client.get(url).send().await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                        let resp = client
+                            .get(url)
+                            .send()
+                            .await
+                            .map_err(|e| RelayError::Runtime(e.to_string()))?;
                         let status = resp.status().as_u16();
                         let headers = resp
                             .headers()
                             .iter()
                             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                             .collect::<HashMap<_, _>>();
-                        let bytes = resp.bytes().await.map_err(|e| RelayError::Runtime(e.to_string()))?.to_vec();
-                        Ok(Value::Obj(Object::HttpResponse(HttpResponseHandle { status, headers, body: bytes })))
+                        let bytes = resp
+                            .bytes()
+                            .await
+                            .map_err(|e| RelayError::Runtime(e.to_string()))?
+                            .to_vec();
+                        Ok(Value::Obj(Object::HttpResponse(HttpResponseHandle {
+                            status,
+                            headers,
+                            body: bytes,
+                        })))
                     }));
                     Ok(Value::Deferred(Arc::new(d)))
                 })
@@ -2449,15 +2858,26 @@ impl HttpHandle {
                             Value::Bytes(b) => req.body(b),
                             other => req.body(other.repr()),
                         };
-                        let resp = req.send().await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                        let resp = req
+                            .send()
+                            .await
+                            .map_err(|e| RelayError::Runtime(e.to_string()))?;
                         let status = resp.status().as_u16();
                         let headers = resp
                             .headers()
                             .iter()
                             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                             .collect::<HashMap<_, _>>();
-                        let bytes = resp.bytes().await.map_err(|e| RelayError::Runtime(e.to_string()))?.to_vec();
-                        Ok(Value::Obj(Object::HttpResponse(HttpResponseHandle { status, headers, body: bytes })))
+                        let bytes = resp
+                            .bytes()
+                            .await
+                            .map_err(|e| RelayError::Runtime(e.to_string()))?
+                            .to_vec();
+                        Ok(Value::Obj(Object::HttpResponse(HttpResponseHandle {
+                            status,
+                            headers,
+                            body: bytes,
+                        })))
                     }));
                     Ok(Value::Deferred(Arc::new(d)))
                 })
@@ -2487,7 +2907,8 @@ impl HttpResponseHandle {
                     let body = body.clone();
                     Box::pin(async move {
                         let s = String::from_utf8_lossy(&body).to_string();
-                        let j: J = serde_json::from_str(&s).map_err(|e| RelayError::Runtime(e.to_string()))?;
+                        let j: J = serde_json::from_str(&s)
+                            .map_err(|e| RelayError::Runtime(e.to_string()))?;
                         Ok(Value::Json(j))
                     })
                 }))
@@ -2524,7 +2945,9 @@ impl MongoClientHandle {
                     let client = client.clone();
                     Box::pin(async move {
                         let name = expect_str(&args, 0, "mongo.db(name)")?;
-                        Ok(Value::Obj(Object::MongoDatabase(MongoDatabaseHandle { db: client.database(&name) })))
+                        Ok(Value::Obj(Object::MongoDatabase(MongoDatabaseHandle {
+                            db: client.database(&name),
+                        })))
                     })
                 }))
             }
@@ -2542,7 +2965,9 @@ impl MongoDatabaseHandle {
                     let db = db.clone();
                     Box::pin(async move {
                         let name = expect_str(&args, 0, "db.collection(name)")?;
-                        Ok(Value::Obj(Object::MongoCollection(MongoCollectionHandle { collection: db.collection::<Document>(&name) })))
+                        Ok(Value::Obj(Object::MongoCollection(MongoCollectionHandle {
+                            collection: db.collection::<Document>(&name),
+                        })))
                     })
                 }))
             }
@@ -2559,9 +2984,15 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let doc = value_to_document(args.get(0).cloned().unwrap_or(Value::None), "collection.insert_one(doc)")?;
+                        let doc = value_to_document(
+                            args.get(0).cloned().unwrap_or(Value::None),
+                            "collection.insert_one(doc)",
+                        )?;
                         let d = Deferred::new(Box::pin(async move {
-                            let result = collection.insert_one(doc, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let result = collection
+                                .insert_one(doc, None)
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
                             let mut obj = serde_json::Map::new();
                             obj.insert("inserted_id".into(), bson_to_json(result.inserted_id)?);
                             Ok(Value::Json(J::Object(obj)))
@@ -2577,14 +3008,21 @@ impl MongoCollectionHandle {
                     Box::pin(async move {
                         let list = match args.get(0) {
                             Some(Value::List(v)) => v.clone(),
-                            _ => return Err(RelayError::Type("collection.insert_many(docs) expects a list".into())),
+                            _ => {
+                                return Err(RelayError::Type(
+                                    "collection.insert_many(docs) expects a list".into(),
+                                ))
+                            }
                         };
                         let mut docs = Vec::with_capacity(list.len());
                         for v in list {
                             docs.push(value_to_document(v, "collection.insert_many(docs)")?);
                         }
                         let d = Deferred::new(Box::pin(async move {
-                            let result = collection.insert_many(docs, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let result = collection
+                                .insert_many(docs, None)
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
                             let mut obj = serde_json::Map::new();
                             let mut ids = serde_json::Map::new();
                             for (k, v) in result.inserted_ids {
@@ -2602,9 +3040,15 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let filter = value_to_document(args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())), "collection.find_one(filter)")?;
+                        let filter = value_to_document(
+                            args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())),
+                            "collection.find_one(filter)",
+                        )?;
                         let d = Deferred::new(Box::pin(async move {
-                            let result = collection.find_one(filter, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let result = collection
+                                .find_one(filter, None)
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
                             match result {
                                 Some(doc) => Ok(Value::Json(bson_to_json(Bson::Document(doc))?)),
                                 None => Ok(Value::None),
@@ -2619,11 +3063,21 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let filter = value_to_document(args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())), "collection.find(filter)")?;
+                        let filter = value_to_document(
+                            args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())),
+                            "collection.find(filter)",
+                        )?;
                         let d = Deferred::new(Box::pin(async move {
-                            let mut cursor = collection.find(filter, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let mut cursor = collection
+                                .find(filter, None)
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
                             let mut out = Vec::new();
-                            while let Some(doc) = cursor.try_next().await.map_err(|e| RelayError::Runtime(e.to_string()))? {
+                            while let Some(doc) = cursor
+                                .try_next()
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?
+                            {
                                 out.push(Value::Json(bson_to_json(Bson::Document(doc))?));
                             }
                             Ok(Value::List(out))
@@ -2638,15 +3092,32 @@ impl MongoCollectionHandle {
                     let collection = collection.clone();
                     Box::pin(async move {
                         if args.len() < 2 {
-                            return Err(RelayError::Type("collection.update_one(filter, update)".into()));
+                            return Err(RelayError::Type(
+                                "collection.update_one(filter, update)".into(),
+                            ));
                         }
-                        let filter = value_to_document(args[0].clone(), "collection.update_one(filter, update)")?;
-                        let update = value_to_document(args[1].clone(), "collection.update_one(filter, update)")?;
+                        let filter = value_to_document(
+                            args[0].clone(),
+                            "collection.update_one(filter, update)",
+                        )?;
+                        let update = value_to_document(
+                            args[1].clone(),
+                            "collection.update_one(filter, update)",
+                        )?;
                         let d = Deferred::new(Box::pin(async move {
-                            let result = collection.update_one(filter, update, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let result = collection
+                                .update_one(filter, update, None)
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
                             let mut obj = serde_json::Map::new();
-                            obj.insert("matched_count".into(), J::Number(result.matched_count.into()));
-                            obj.insert("modified_count".into(), J::Number(result.modified_count.into()));
+                            obj.insert(
+                                "matched_count".into(),
+                                J::Number(result.matched_count.into()),
+                            );
+                            obj.insert(
+                                "modified_count".into(),
+                                J::Number(result.modified_count.into()),
+                            );
                             if let Some(id) = result.upserted_id {
                                 obj.insert("upserted_id".into(), bson_to_json(id)?);
                             }
@@ -2661,9 +3132,15 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let filter = value_to_document(args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())), "collection.delete_one(filter)")?;
+                        let filter = value_to_document(
+                            args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())),
+                            "collection.delete_one(filter)",
+                        )?;
                         let d = Deferred::new(Box::pin(async move {
-                            let result = collection.delete_one(filter, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let result = collection
+                                .delete_one(filter, None)
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
                             Ok(Value::Int(result.deleted_count as i64))
                         }));
                         Ok(Value::Deferred(Arc::new(d)))
@@ -2675,9 +3152,15 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let filter = value_to_document(args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())), "collection.delete_many(filter)")?;
+                        let filter = value_to_document(
+                            args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())),
+                            "collection.delete_many(filter)",
+                        )?;
                         let d = Deferred::new(Box::pin(async move {
-                            let result = collection.delete_many(filter, None).await.map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let result = collection
+                                .delete_many(filter, None)
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
                             Ok(Value::Int(result.deleted_count as i64))
                         }));
                         Ok(Value::Deferred(Arc::new(d)))
@@ -2703,6 +3186,32 @@ impl Object {
                         Box::pin(async move { Ok(Value::Obj(Object::Route(a.route()))) })
                     }))
                 }
+                "redirect" => Value::Builtin(Arc::new(move |args, _| {
+                    Box::pin(async move {
+                        let location = expect_str(&args, 0, "app.redirect(location)")?;
+                        let mut headers = HashMap::new();
+                        headers.insert("location".into(), location);
+                        Ok(Value::Response(Response {
+                            status: 302,
+                            content_type: "text/plain; charset=utf-8".into(),
+                            body: Vec::new(),
+                            headers,
+                            set_cookies: vec![],
+                        }))
+                    })
+                })),
+                "json" => Value::Builtin(Arc::new(move |args, _| {
+                    Box::pin(async move {
+                        let body = args.get(0).cloned().unwrap_or(Value::None);
+                        Ok(Value::Response(Response {
+                            status: 200,
+                            content_type: "application/json".into(),
+                            body: value_to_json(&body).to_string().into_bytes(),
+                            headers: HashMap::new(),
+                            set_cookies: vec![],
+                        }))
+                    })
+                })),
                 _ => Value::None,
             },
             Object::Route(_r) => Value::None, // decorators handle route registration
@@ -2714,7 +3223,11 @@ impl Object {
                         Box::pin(async move {
                             let app = match args.get(0) {
                                 Some(Value::Obj(Object::WebApp(a))) => a.clone(),
-                                _ => return Err(RelayError::Type("server.run(app) expects a WebApp".into())),
+                                _ => {
+                                    return Err(RelayError::Type(
+                                        "server.run(app) expects a WebApp".into(),
+                                    ))
+                                }
                             };
                             s.run(app).await
                         })
@@ -2748,25 +3261,48 @@ impl WebServerHandle {
 // ========================= Web handler injection + smart returns =========================
 
 impl Evaluator {
-    async fn call_web_handler(&self, fn_name: &str, req: RequestParts) -> RResult<Value> {
+    async fn call_web_handler(
+        &self,
+        app: WebAppHandle,
+        fn_name: &str,
+        req: RequestParts,
+    ) -> RResult<Value> {
         // Path > Body > Query precedence, and "data: Json" style typing
         let f = { self.env.lock().await.get(fn_name)? };
         let f = self.resolve_if_needed(f).await?;
 
         let func = match f {
             Value::Function(f) => f,
-            _ => return Err(RelayError::Type(format!("Handler {fn_name} is not a function"))),
+            _ => {
+                return Err(RelayError::Type(format!(
+                    "Handler {fn_name} is not a function"
+                )))
+            }
         };
+
+        let RequestParts {
+            method,
+            path,
+            path_params,
+            query,
+            json,
+            headers,
+            cookies,
+            session_id,
+        } = req;
+
+        let query_map = query.clone();
+        let json_body = json.clone();
 
         // build arg map by param list
         let mut bound: HashMap<String, Value> = HashMap::new();
 
         // start with Query
-        for (k, v) in req.query {
+        for (k, v) in query {
             bound.insert(k, Value::Str(v));
         }
         // then Body
-        if let Some(j) = req.json {
+        if let Some(j) = json {
             // if handler has a Json param name, bind it (first param typed Json)
             let mut json_param_name = None;
             for p in &func.params {
@@ -2776,14 +3312,14 @@ impl Evaluator {
                 }
             }
             if let Some(n) = json_param_name {
-                bound.insert(n, Value::Json(j));
+                bound.insert(n, Value::Json(j.clone()));
             } else {
                 // default: "data"
-                bound.insert("data".into(), Value::Json(j));
+                bound.insert("data".into(), Value::Json(j.clone()));
             }
         }
         // then Path overrides
-        for (k, v) in req.path_params {
+        for (k, v) in path_params {
             bound.insert(k, Value::Str(v));
         }
 
@@ -2791,7 +3327,10 @@ impl Evaluator {
         for p in &func.params {
             if !bound.contains_key(&p.name) {
                 if let Some(def) = &p.default {
-                    bound.insert(p.name.clone(), self.resolve_if_needed(self.eval_expr(def).await?).await?);
+                    bound.insert(
+                        p.name.clone(),
+                        self.resolve_if_needed(self.eval_expr(def).await?).await?,
+                    );
                 } else {
                     bound.insert(p.name.clone(), Value::None);
                 }
@@ -2806,6 +3345,45 @@ impl Evaluator {
             }
         }
 
+        let mut req_dict = IndexMap::new();
+        req_dict.insert("method".into(), Value::Str(method));
+        req_dict.insert("path".into(), Value::Str(path));
+        req_dict.insert(
+            "query".into(),
+            Value::Dict(
+                query_map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                    .collect(),
+            ),
+        );
+        req_dict.insert(
+            "headers".into(),
+            Value::Dict(
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                    .collect(),
+            ),
+        );
+        req_dict.insert(
+            "cookies".into(),
+            Value::Dict(
+                cookies
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                    .collect(),
+            ),
+        );
+        if let Some(j) = json_body {
+            req_dict.insert("json".into(), Value::Json(j));
+        }
+
+        let existing_session = session_id
+            .as_ref()
+            .map(|sid| app.get_session(sid))
+            .unwrap_or_default();
+
         // run handler in new scope
         {
             let mut env = self.env.lock().await;
@@ -2813,6 +3391,17 @@ impl Evaluator {
             for (k, v) in &bound {
                 env.set(k, v.clone());
             }
+            env.set("request", Value::Dict(req_dict));
+            env.set(
+                "cookies",
+                Value::Dict(
+                    cookies
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                        .collect(),
+                ),
+            );
+            env.set("session", Value::Dict(existing_session.clone()));
         }
 
         let out = match self.eval_block(&func.body).await? {
@@ -2821,13 +3410,20 @@ impl Evaluator {
         };
 
         // template strings: render with locals if string contains {{ }}
-        let rendered = {
+        let (rendered, final_session) = {
             let env = self.env.lock().await;
             let locals = env.snapshot_top();
-            match out {
-                Value::Str(s) if s.contains("{{") && s.contains("}}") => Value::Str(render_template(&s, &locals)),
+            let session = match locals.get("session") {
+                Some(Value::Dict(m)) => m.clone(),
+                _ => existing_session,
+            };
+            let rendered = match out {
+                Value::Str(s) if s.contains("{{") && s.contains("}}") => {
+                    Value::Str(render_template(&s, &locals))
+                }
                 other => other,
-            }
+            };
+            (rendered, session)
         };
 
         {
@@ -2835,9 +3431,80 @@ impl Evaluator {
             env.pop();
         }
 
-        // smart returns:
-        // dict/list/json => JSON response; string => text/plain or html; bytes => binary; Response => manual
-        Ok(rendered)
+        let mut response = match rendered {
+            Value::Response(r) => r,
+            Value::Json(j) => Response {
+                status: 200,
+                content_type: "application/json".into(),
+                body: j.to_string().into_bytes(),
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            },
+            Value::Dict(m) => {
+                let mut obj = serde_json::Map::new();
+                for (k, vv) in m {
+                    obj.insert(k, J::String(vv.repr()));
+                }
+                Response {
+                    status: 200,
+                    content_type: "application/json".into(),
+                    body: J::Object(obj).to_string().into_bytes(),
+                    headers: HashMap::new(),
+                    set_cookies: vec![],
+                }
+            }
+            Value::List(vs) => {
+                let arr = vs
+                    .into_iter()
+                    .map(|x| J::String(x.repr()))
+                    .collect::<Vec<_>>();
+                Response {
+                    status: 200,
+                    content_type: "application/json".into(),
+                    body: J::Array(arr).to_string().into_bytes(),
+                    headers: HashMap::new(),
+                    set_cookies: vec![],
+                }
+            }
+            Value::Bytes(b) => Response {
+                status: 200,
+                content_type: "application/octet-stream".into(),
+                body: b,
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            },
+            Value::Str(s) => {
+                let ct = if s.contains("<") || s.contains("{{") {
+                    "text/html; charset=utf-8"
+                } else {
+                    "text/plain; charset=utf-8"
+                };
+                Response {
+                    status: 200,
+                    content_type: ct.into(),
+                    body: s.into_bytes(),
+                    headers: HashMap::new(),
+                    set_cookies: vec![],
+                }
+            }
+            other => Response {
+                status: 200,
+                content_type: "text/plain; charset=utf-8".into(),
+                body: other.repr().into_bytes(),
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            },
+        };
+
+        if !final_session.is_empty() {
+            let sid = session_id.unwrap_or_else(new_session_id);
+            app.put_session(sid.clone(), final_session);
+            response
+                .set_cookies
+                .push(format!("relay_sid={sid}; Path=/; HttpOnly; SameSite=Lax"));
+        }
+
+        Ok(Value::Response(response))
     }
 }
 
@@ -2871,7 +3538,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // run program (this defines functions, registers decorators if route exists before defs)
-    let result = evaluator.eval_program(&program).await.map_err(anyhow::Error::msg)?;
+    let result = evaluator
+        .eval_program(&program)
+        .await
+        .map_err(anyhow::Error::msg)?;
 
     // Wait for any background Deferred/Task spawned by expression statements
     drain_bg().await;
