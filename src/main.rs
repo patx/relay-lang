@@ -721,6 +721,12 @@ impl Parser {
             return self.parse_import();
         }
 
+        if self.peek_else() {
+            return Err(
+                self.err_here("'else' without matching if (check indentation and block structure)")
+            );
+        }
+
         if self.peek_destructure_assign() {
             return self.parse_destructure_assign();
         }
@@ -820,6 +826,7 @@ impl Parser {
         self.expect_newline()?;
         let then_block = self.parse_block()?;
         let mut else_block = Vec::new();
+
         self.skip_newlines();
         if self.peek_else() {
             self.bump();
