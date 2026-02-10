@@ -1872,8 +1872,8 @@ Found a bug? [Open an issue](https://github.com/patx/relay-lang/issues) with:
 - [x] Destructuring assignment
 - [x] Error handling with try/except
 - [ ] WebSocket support
-- [ ] Static file serving
-- [ ] Middleware support
+- [X] Static file serving
+- [X] Middleware support
 
 **v0.3 (Future):**
 - [ ] Package manager
