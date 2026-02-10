@@ -13,6 +13,7 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
+    path::Component,
     path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -1434,6 +1435,16 @@ impl Env {
     fn snapshot_top(&self) -> HashMap<String, Value> {
         self.scopes.last().unwrap().clone()
     }
+
+    fn snapshot_merged(&self) -> HashMap<String, Value> {
+        let mut merged = HashMap::new();
+        for scope in &self.scopes {
+            for (k, v) in scope {
+                merged.insert(k.clone(), v.clone());
+            }
+        }
+        merged
+    }
 }
 
 // ========================= Template strings =========================
@@ -1803,7 +1814,17 @@ impl Evaluator {
             Expr::Float(f) => Ok(Value::Float(*f)),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::None => Ok(Value::None),
-            Expr::Str(s) => Ok(Value::Str(s.clone())),
+            Expr::Str(s) => {
+                if s.contains("{{") && s.contains("}}") {
+                    let locals = {
+                        let env = self.env.lock().await;
+                        env.snapshot_merged()
+                    };
+                    Ok(Value::Str(render_template(s, &locals)))
+                } else {
+                    Ok(Value::Str(s.clone()))
+                }
+            }
             Expr::Ident(s) => self.env.lock().await.get(s),
 
             Expr::List(items) => {
@@ -2749,6 +2770,8 @@ struct WebServerHandle;
 #[derive(Default)]
 struct AppState {
     routes: Vec<RouteSpec>,
+    middlewares: Vec<String>,
+    static_mounts: Vec<StaticMount>,
     sessions: HashMap<String, IndexMap<String, Value>>,
 }
 #[derive(Clone)]
@@ -2756,6 +2779,12 @@ struct RouteSpec {
     method: String,
     path: String,
     fn_name: String,
+}
+
+#[derive(Clone)]
+struct StaticMount {
+    route_prefix: String,
+    dir: String,
 }
 
 impl WebServerHandle {
@@ -2783,6 +2812,21 @@ impl WebAppHandle {
             path,
             fn_name,
         });
+    }
+
+    fn use_middleware(&self, fn_name: String) {
+        let mut st = self.inner.lock().unwrap();
+        st.middlewares.push(fn_name);
+    }
+
+    fn mount_static(&self, route_prefix: String, dir: String) {
+        let mut st = self.inner.lock().unwrap();
+        st.static_mounts.push(StaticMount { route_prefix, dir });
+    }
+
+    fn middleware_names(&self) -> Vec<String> {
+        let st = self.inner.lock().unwrap();
+        st.middlewares.clone()
     }
 
     fn get_session(&self, sid: &str) -> IndexMap<String, Value> {
@@ -2853,8 +2897,43 @@ fn get_global_callback() -> Option<HandlerCb> {
 }
 
 async fn run_app(app: WebAppHandle) -> RResult<()> {
-    let specs = app.inner.lock().unwrap().routes.clone();
+    let (specs, static_mounts) = {
+        let state = app.inner.lock().unwrap();
+        (state.routes.clone(), state.static_mounts.clone())
+    };
     let mut router = Router::new();
+
+    for mount in static_mounts {
+        let route = normalize_static_route_prefix(&mount.route_prefix);
+        let path_pattern = format!("{}/*file", route.trim_end_matches('/'));
+        let dir = mount.dir.clone();
+
+        let dir_for_index = dir.clone();
+        let route_for_index = route.clone();
+        let index_handler = move || {
+            let dir = dir_for_index.clone();
+            let route_prefix = route_for_index.clone();
+            async move {
+                let response = serve_static_file(&route_prefix, &dir, "index.html").await;
+                Ok::<_, (StatusCode, String)>(value_to_axum_response(Value::Response(response)).await.into_response())
+            }
+        };
+
+        let dir_for_files = dir.clone();
+        let route_for_files = route.clone();
+        let static_handler = move |Path(file): Path<String>| {
+            let dir = dir_for_files.clone();
+            let route_prefix = route_for_files.clone();
+            async move {
+                let response = serve_static_file(&route_prefix, &dir, &file).await;
+                Ok::<_, (StatusCode, String)>(value_to_axum_response(Value::Response(response)).await.into_response())
+            }
+        };
+
+        router = router
+            .route(&route, get(index_handler))
+            .route(&path_pattern, get(static_handler));
+    }
 
     for r in specs {
         let method = r.method.to_lowercase();
@@ -2977,6 +3056,90 @@ fn relay_path_to_axum(p: &str) -> String {
         i += 1;
     }
     out
+}
+
+fn normalize_static_route_prefix(prefix: &str) -> String {
+    if prefix.is_empty() || prefix == "/" {
+        "/".to_string()
+    } else {
+        let mut normalized = prefix.to_string();
+        if !normalized.starts_with('/') {
+            normalized.insert(0, '/');
+        }
+        while normalized.len() > 1 && normalized.ends_with('/') {
+            normalized.pop();
+        }
+        normalized
+    }
+}
+
+fn safe_static_join(base: &str, rel_file: &str) -> Option<PathBuf> {
+    let rel = PathBuf::from(rel_file);
+    if rel.is_absolute() {
+        return None;
+    }
+    if rel
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    {
+        return None;
+    }
+    Some(PathBuf::from(base).join(rel))
+}
+
+fn guess_content_type(path: &str) -> &'static str {
+    if let Some(ext) = path.rsplit('.').next() {
+        match ext.to_ascii_lowercase().as_str() {
+            "html" | "htm" => "text/html; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "js" | "mjs" => "application/javascript; charset=utf-8",
+            "json" => "application/json",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "txt" => "text/plain; charset=utf-8",
+            _ => "application/octet-stream",
+        }
+    } else {
+        "application/octet-stream"
+    }
+}
+
+async fn serve_static_file(route_prefix: &str, dir: &str, file: &str) -> Response {
+    let target = if file.is_empty() {
+        "index.html".to_string()
+    } else {
+        file.to_string()
+    };
+
+    let Some(path) = safe_static_join(dir, &target) else {
+        return Response {
+            status: 400,
+            content_type: "text/plain; charset=utf-8".into(),
+            body: format!("Bad static file path under {route_prefix}").into_bytes(),
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        };
+    };
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Response {
+            status: 200,
+            content_type: guess_content_type(&target).into(),
+            body: bytes,
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        },
+        Err(_) => Response {
+            status: 404,
+            content_type: "text/plain; charset=utf-8".into(),
+            body: b"Not Found".to_vec(),
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        },
+    }
 }
 
 async fn value_to_axum_response(v: Value) -> axum::response::Response {
@@ -3492,6 +3655,39 @@ impl Object {
                         }))
                     })
                 })),
+                "use" => {
+                    let a = a.clone();
+                    Value::Builtin(Arc::new(move |args, _| {
+                        let a = a.clone();
+                        Box::pin(async move {
+                            let middleware_fn = args.get(0).cloned().ok_or_else(|| {
+                                RelayError::Type("app.use(fn) expects a function".into())
+                            })?;
+                            let fn_name = match middleware_fn {
+                                Value::Function(f) => f.name.clone(),
+                                _ => {
+                                    return Err(RelayError::Type(
+                                        "app.use(fn) expects a function".into(),
+                                    ))
+                                }
+                            };
+                            a.use_middleware(fn_name);
+                            Ok(Value::None)
+                        })
+                    }))
+                }
+                "static" => {
+                    let a = a.clone();
+                    Value::Builtin(Arc::new(move |args, _| {
+                        let a = a.clone();
+                        Box::pin(async move {
+                            let route_prefix = expect_str(&args, 0, "app.static(route, dir)")?;
+                            let dir = expect_str(&args, 1, "app.static(route, dir)")?;
+                            a.mount_static(route_prefix, dir);
+                            Ok(Value::None)
+                        })
+                    }))
+                }
                 _ => Value::None,
             },
             Object::Route(_r) => Value::None, // decorators handle route registration
@@ -3684,26 +3880,51 @@ impl Evaluator {
             env.set("session", Value::Dict(existing_session.clone()));
         }
 
+        for mw_name in app.middleware_names() {
+            let mw_value = self.env.lock().await.get(&mw_name)?;
+            let mw_func = match mw_value {
+                Value::Function(f) => f,
+                _ => {
+                    return Err(RelayError::Type(format!(
+                        "Middleware '{mw_name}' is not a function"
+                    )))
+                }
+            };
+
+            let result = self.eval_block(&mw_func.body).await?;
+            if let Flow::Return(v) = result {
+                if !matches!(v, Value::None) {
+                    let final_session = {
+                        let env = self.env.lock().await;
+                        let locals = env.snapshot_top();
+                        match locals.get("session") {
+                            Some(Value::Dict(m)) => m.clone(),
+                            _ => existing_session.clone(),
+                        }
+                    };
+
+                    {
+                        let mut env = self.env.lock().await;
+                        env.pop();
+                    }
+
+                    return Ok(apply_session_and_cookies(app, session_id, final_session, v));
+                }
+            }
+        }
+
         let out = match self.eval_block(&func.body).await? {
             Flow::None => Value::None,
             Flow::Return(v) => v,
         };
 
-        // template strings: render with locals if string contains {{ }}
-        let (rendered, final_session) = {
+        let final_session = {
             let env = self.env.lock().await;
             let locals = env.snapshot_top();
-            let session = match locals.get("session") {
+            match locals.get("session") {
                 Some(Value::Dict(m)) => m.clone(),
                 _ => existing_session,
-            };
-            let rendered = match out {
-                Value::Str(s) if s.contains("{{") && s.contains("}}") => {
-                    Value::Str(render_template(&s, &locals))
-                }
-                other => other,
-            };
-            (rendered, session)
+            }
         };
 
         {
@@ -3711,7 +3932,7 @@ impl Evaluator {
             env.pop();
         }
 
-        let mut response = match rendered {
+        let mut response = match out {
             Value::Response(r) => r,
             Value::Json(j) => Response {
                 status: 200,
@@ -3786,6 +4007,88 @@ impl Evaluator {
 
         Ok(Value::Response(response))
     }
+}
+
+fn apply_session_and_cookies(
+    app: WebAppHandle,
+    session_id: Option<String>,
+    final_session: IndexMap<String, Value>,
+    out: Value,
+) -> Value {
+    let mut response = match out {
+        Value::Response(r) => r,
+        Value::Json(j) => Response {
+            status: 200,
+            content_type: "application/json".into(),
+            body: j.to_string().into_bytes(),
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        },
+        Value::Dict(m) => {
+            let mut obj = serde_json::Map::new();
+            for (k, vv) in m {
+                obj.insert(k, J::String(vv.repr()));
+            }
+            Response {
+                status: 200,
+                content_type: "application/json".into(),
+                body: J::Object(obj).to_string().into_bytes(),
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            }
+        }
+        Value::List(vs) => {
+            let arr = vs
+                .into_iter()
+                .map(|x| J::String(x.repr()))
+                .collect::<Vec<_>>();
+            Response {
+                status: 200,
+                content_type: "application/json".into(),
+                body: J::Array(arr).to_string().into_bytes(),
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            }
+        }
+        Value::Bytes(b) => Response {
+            status: 200,
+            content_type: "application/octet-stream".into(),
+            body: b,
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        },
+        Value::Str(s) => {
+            let ct = if s.contains("<") || s.contains("{{") {
+                "text/html; charset=utf-8"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+            Response {
+                status: 200,
+                content_type: ct.into(),
+                body: s.into_bytes(),
+                headers: HashMap::new(),
+                set_cookies: vec![],
+            }
+        }
+        other => Response {
+            status: 200,
+            content_type: "text/plain; charset=utf-8".into(),
+            body: other.repr().into_bytes(),
+            headers: HashMap::new(),
+            set_cookies: vec![],
+        },
+    };
+
+    if !final_session.is_empty() {
+        let sid = session_id.unwrap_or_else(new_session_id);
+        app.put_session(sid.clone(), final_session);
+        response
+            .set_cookies
+            .push(format!("relay_sid={sid}; Path=/; HttpOnly; SameSite=Lax"));
+    }
+
+    Value::Response(response)
 }
 
 // ========================= Main =========================
