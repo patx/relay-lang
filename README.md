@@ -45,7 +45,7 @@ Relay is designed for building high-performance web services, APIs, and network 
 - **HTTP Client**: Simple, async HTTP requests built-in
 - **MongoDB Integration**: Native async MongoDB support
 - **Session Management**: Built-in session handling with HttpOnly cookies
-- **Template Rendering**: Lightweight Jinja-style templating (`{{ variable }}`)
+- **Template Rendering**: MiniJinja-powered templates available in any string expression (`{{ variable }}`)
 - **Type Hints**: Optional runtime type checking for function parameters
 - **List Comprehensions**: Python-style inline list transforms with optional filtering
 - **Destructuring Assignment**: Unpack lists/strings/dicts into multiple variables
@@ -970,21 +970,32 @@ fn submit(data)
     return app.redirect("/success")
 ```
 
-#### Template Rendering
+#### Template Rendering (MiniJinja)
 
-Return strings with `{{ variable }}` syntax for simple templating:
+Relay uses **MiniJinja** (Rust implementation of Jinja2) for template interpolation in strings.
+
+Template strings are evaluated anywhere in the interpreter (not only in web handlers) when a string contains both `{{` and `}}`.
 
 ```relay
 name = "Relay"
 version = "0.1"
 
+title = "{{ name }} v{{ version }}"
+print(title)  // Relay v0.1
+
+items = ["a", "b", "c"]
+print("Count: {{ items | length }}")
+```
+
+Web handlers use the same engine:
+
+```relay
 @app.get("/")
 fn index()
     return "<h1>{{ name }} v{{ version }}</h1>"
-    // Renders: <h1>Relay v0.1</h1>
 ```
 
-Templates have access to all variables in the handler's scope.
+Templates can reference values in the current scope and support MiniJinja expressions/filters.
 
 #### `WebServer()`
 Create a web server instance.

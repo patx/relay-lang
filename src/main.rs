@@ -31,8 +31,8 @@ use axum::{
 
 use async_recursion::async_recursion;
 use futures::{stream::TryStreamExt, SinkExt, StreamExt};
-use html_escape::encode_safe;
 use indexmap::IndexMap;
+use minijinja::{context, Environment};
 use mongodb::{
     bson::{self, Bson, Document},
     Client as MongoClient, Collection as MongoCollection, Database as MongoDatabase,
@@ -252,6 +252,7 @@ struct Lexer<'a> {
     indent_stack: Vec<usize>,
     pending_dedents: usize,
     at_line_start: bool,
+    grouping_depth: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -264,6 +265,7 @@ impl<'a> Lexer<'a> {
             indent_stack: vec![0],
             pending_dedents: 0,
             at_line_start: true,
+            grouping_depth: 0,
         }
     }
 
@@ -286,9 +288,12 @@ impl<'a> Lexer<'a> {
                 if has_tabs {
                     return Err(self.err("Tabs are not allowed (spaces only)"));
                 }
-                // blank line or comment-only line => ignore indentation
-                if self.peek_is_newline() || self.peek_is_comment_start() {
-                    // no indent changes
+
+                // Inside (), [] and {}, indentation/newlines are ignored for implicit line joining.
+                if self.grouping_depth > 0 {
+                    self.at_line_start = false;
+                } else if self.peek_is_newline() || self.peek_is_comment_start() {
+                    // blank line or comment-only line => ignore indentation
                 } else {
                     if spaces % 4 != 0 {
                         return Err(self.err("Indentation must be 4 spaces per level"));
@@ -309,8 +314,8 @@ impl<'a> Lexer<'a> {
                             continue;
                         }
                     }
+                    self.at_line_start = false;
                 }
-                self.at_line_start = false;
             }
 
             self.skip_ws_inline();
@@ -331,34 +336,48 @@ impl<'a> Lexer<'a> {
             let c = self.peek_char().unwrap();
             if c == '\n' {
                 self.advance_char();
-                out.push(self.tok(Tok::Newline));
                 self.at_line_start = true;
+                if self.grouping_depth == 0 {
+                    out.push(self.tok(Tok::Newline));
+                }
                 continue;
             }
 
             let kind = match c {
                 '(' => {
                     self.advance_char();
+                    self.grouping_depth += 1;
                     Tok::LParen
                 }
                 ')' => {
                     self.advance_char();
+                    if self.grouping_depth > 0 {
+                        self.grouping_depth -= 1;
+                    }
                     Tok::RParen
                 }
                 '[' => {
                     self.advance_char();
+                    self.grouping_depth += 1;
                     Tok::LBracket
                 }
                 ']' => {
                     self.advance_char();
+                    if self.grouping_depth > 0 {
+                        self.grouping_depth -= 1;
+                    }
                     Tok::RBracket
                 }
                 '{' => {
                     self.advance_char();
+                    self.grouping_depth += 1;
                     Tok::LBrace
                 }
                 '}' => {
                     self.advance_char();
+                    if self.grouping_depth > 0 {
+                        self.grouping_depth -= 1;
+                    }
                     Tok::RBrace
                 }
                 ',' => {
@@ -1456,27 +1475,15 @@ impl Env {
 
 // ========================= Template strings =========================
 
-fn render_template(s: &str, locals: &HashMap<String, Value>) -> String {
-    // Replace {{ key }} with HTML-escaped value.repr()
-    let mut out = String::new();
-    let mut i = 0;
-    while let Some(start) = s[i..].find("{{") {
-        let start = i + start;
-        out.push_str(&s[i..start]);
-        if let Some(end) = s[start + 2..].find("}}") {
-            let end = start + 2 + end;
-            let key = s[start + 2..end].trim();
-            if let Some(v) = locals.get(key) {
-                out.push_str(&encode_safe(&v.repr()));
-            }
-            i = end + 2;
-        } else {
-            out.push_str(&s[start..]);
-            return out;
-        }
+fn render_template(s: &str, locals: &HashMap<String, Value>) -> RResult<String> {
+    let mut ctx = serde_json::Map::new();
+    for (key, value) in locals {
+        ctx.insert(key.clone(), value_to_json(value));
     }
-    out.push_str(&s[i..]);
-    out
+
+    Environment::new()
+        .render_str(s, context!(..ctx))
+        .map_err(|e| RelayError::Runtime(format!("Template render error: {e}")))
 }
 
 // ========================= Evaluator (async, implicit Deferred) =========================
@@ -1827,7 +1834,7 @@ impl Evaluator {
                         let env = self.env.lock().await;
                         env.snapshot_merged()
                     };
-                    Ok(Value::Str(render_template(s, &locals)))
+                    Ok(Value::Str(render_template(s, &locals)?))
                 } else {
                     Ok(Value::Str(s.clone()))
                 }
