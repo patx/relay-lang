@@ -266,34 +266,67 @@ MongoDB helpers return `Deferred` values, so they run asynchronously until the r
 
 ```relay
 app = WebApp()
-route = app.route()
 server = WebServer()
 
-@route.get("/")
+@app.get("/")
 fn index()
-    return "Hello world"
+    return read_file("docs/index.html")
 
-@route.get("/hello/<name>")
-fn hello(name)
-    return "Hello {{ name }}"
+@app.post("/")
+fn create_paste(paste)
+    id = "abc123"
+    return app.redirect("/" + id)
 
 server.run(app)
 ```
 
 Notes:
-- Define `app`/`route` before the decorated handlers.
-- Decorators can use `@app.get("/path")` directly instead of `@route.get`.
-- Returning a dict/list/json produces a JSON response.
+- Flask/FastAPI-like decorators: `@app.get`, `@app.post`, `@app.put`, `@app.patch`, `@app.delete`.
+- Path params use `<name>` syntax, e.g. `@app.get("/p/<pid>")`.
+- Handler params are auto-bound from query/body/path (path wins over body, body wins over query).
+- `app.redirect(url)` returns an HTTP 302 response with a `Location` header.
+- `request`, `cookies`, and `session` are injected into each handler scope.
+- Returning dict/list/json produces JSON; strings become text/html/plain automatically.
+- `session` persists via an HttpOnly `relay_sid` cookie.
 
 ### Custom responses
 
 ```relay
-@route.get("/status")
+@app.get("/status")
 fn status()
     return Response({"ok": True}, status=201, content_type="application/json")
 ```
 
-Relay will infer `content_type` when possible; use `Response(...)` to force status codes or headers.
+Relay will infer `content_type` when possible; use `Response(...)` to force status codes/content types.
+
+### Pastebin-style example (Mongo + redirect)
+
+```relay
+app = WebApp()
+server = WebServer()
+mongo = Mongo("mongodb://localhost:27017")
+db = mongo.db("relay_demo")
+pastes = db.collection("pastes")
+
+@app.get("/")
+fn index()
+    return read_file("docs/index.html")
+
+@app.get("/<pid>")
+fn view_paste(pid)
+    paste = pastes.find_one({"_id": pid})
+    if (paste == None)
+        return Response("not found", status=404)
+    return str(paste["paste_content"])
+
+@app.post("/")
+fn new_paste(paste)
+    inserted = pastes.insert_one({"paste_content": paste})
+    pid = str(inserted["inserted_id"])
+    return app.redirect("/" + pid)
+
+server.run(app)
+```
 
 ---
 
