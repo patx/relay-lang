@@ -79,6 +79,10 @@ enum Stmt {
         op: AugOp,
         expr: Expr,
     },
+    DestructureAssign {
+        targets: Vec<String>,
+        expr: Expr,
+    },
     Return(Option<Expr>),
 
     If {
@@ -94,6 +98,11 @@ enum Stmt {
         var: String,
         iter: Expr,
         body: Vec<Stmt>,
+    },
+    TryExcept {
+        err_name: Option<String>,
+        try_block: Vec<Stmt>,
+        except_block: Vec<Stmt>,
     },
 
     FuncDef {
@@ -137,6 +146,12 @@ enum Expr {
     Ident(String),
 
     List(Vec<Expr>),
+    ListComp {
+        expr: Box<Expr>,
+        var: String,
+        iter: Box<Expr>,
+        filter: Option<Box<Expr>>,
+    },
     Dict(Vec<(Expr, Expr)>),
 
     Member {
@@ -411,8 +426,10 @@ impl<'a> Lexer<'a> {
                     if is_ident_start(c) {
                         let id = self.read_ident();
                         let k = match id.as_str() {
-                            "fn" | "if" | "for" | "while" | "return" | "True" | "False"
-                            | "None" | "str" | "int" | "float" => Tok::Keyword(id),
+                            "fn" | "if" | "for" | "while" | "return" | "try" | "except"
+                            | "True" | "False" | "None" | "str" | "int" | "float" => {
+                                Tok::Keyword(id)
+                            }
                             _ => Tok::Ident(id),
                         };
                         out.push(self.wrap(k));
@@ -655,6 +672,13 @@ impl Parser {
         if self.peek_kw("return") {
             return self.parse_return();
         }
+        if self.peek_kw("try") {
+            return self.parse_try_except();
+        }
+
+        if self.peek_destructure_assign() {
+            return self.parse_destructure_assign();
+        }
 
         // assignment
         if let Some(name) = self.peek_ident_string() {
@@ -795,6 +819,64 @@ impl Parser {
             return Ok(Stmt::Return(None));
         }
         Ok(Stmt::Return(Some(self.parse_expr()?)))
+    }
+
+    fn parse_try_except(&mut self) -> RResult<Stmt> {
+        self.expect_kw("try")?;
+        self.expect_newline()?;
+        let try_block = self.parse_block()?;
+        self.skip_newlines();
+
+        self.expect_kw("except")?;
+        let err_name = if self.peek_is(&Tok::LParen) {
+            self.bump();
+            let name = self.expect_ident()?;
+            self.expect(&Tok::RParen)?;
+            Some(name)
+        } else {
+            None
+        };
+        self.expect_newline()?;
+        let except_block = self.parse_block()?;
+
+        Ok(Stmt::TryExcept {
+            err_name,
+            try_block,
+            except_block,
+        })
+    }
+
+    fn peek_destructure_assign(&self) -> bool {
+        let mut idx = 0usize;
+        if !matches!(
+            self.t.get(self.i + idx).map(|t| &t.kind),
+            Some(Tok::Ident(_))
+        ) {
+            return false;
+        }
+        idx += 1;
+        let mut count = 1usize;
+        while matches!(self.t.get(self.i + idx).map(|t| &t.kind), Some(Tok::Comma))
+            && matches!(
+                self.t.get(self.i + idx + 1).map(|t| &t.kind),
+                Some(Tok::Ident(_))
+            )
+        {
+            idx += 2;
+            count += 1;
+        }
+        count > 1 && matches!(self.t.get(self.i + idx).map(|t| &t.kind), Some(Tok::Assign))
+    }
+
+    fn parse_destructure_assign(&mut self) -> RResult<Stmt> {
+        let mut targets = vec![self.expect_ident()?];
+        while self.peek_is(&Tok::Comma) {
+            self.bump();
+            targets.push(self.expect_ident()?);
+        }
+        self.expect(&Tok::Assign)?;
+        let expr = self.parse_expr()?;
+        Ok(Stmt::DestructureAssign { targets, expr })
     }
 
     fn parse_block(&mut self) -> RResult<Vec<Stmt>> {
@@ -944,13 +1026,34 @@ impl Parser {
             Tok::LBracket => {
                 let mut items = Vec::new();
                 if !self.peek_is(&Tok::RBracket) {
-                    loop {
-                        items.push(self.parse_expr()?);
-                        if self.peek_is(&Tok::Comma) {
-                            self.bump();
-                            continue;
+                    let first = self.parse_expr()?;
+                    if self.peek_kw("for") {
+                        self.bump();
+                        let var = self.expect_ident()?;
+                        let kw_in = self.expect_ident()?;
+                        if kw_in != "in" {
+                            return Err(self.err_here("Expected 'in' in list comprehension"));
                         }
-                        break;
+                        let iter = self.parse_expr()?;
+                        let filter = if self.peek_kw("if") {
+                            self.bump();
+                            Some(Box::new(self.parse_expr()?))
+                        } else {
+                            None
+                        };
+                        self.expect(&Tok::RBracket)?;
+                        return Ok(Expr::ListComp {
+                            expr: Box::new(first),
+                            var,
+                            iter: Box::new(iter),
+                            filter,
+                        });
+                    }
+
+                    items.push(first);
+                    while self.peek_is(&Tok::Comma) {
+                        self.bump();
+                        items.push(self.parse_expr()?);
                     }
                 }
                 self.expect(&Tok::RBracket)?;
@@ -1462,6 +1565,25 @@ impl Evaluator {
                 }
                 Ok(Flow::None)
             }
+            Stmt::DestructureAssign { targets, expr } => {
+                let itv = self.resolve_if_needed(self.eval_expr(expr).await?).await?;
+                let items = self.to_iter_items(itv, "Destructuring assignment")?;
+                if items.len() != targets.len() {
+                    return Err(RelayError::Runtime(format!(
+                        "Destructuring assignment expected {} values, got {}",
+                        targets.len(),
+                        items.len()
+                    )));
+                }
+
+                let mut env = self.env.lock().await;
+                for (name, value) in targets.iter().zip(items.into_iter()) {
+                    if !env.assign_existing(name, value.clone()) {
+                        env.set(name, value);
+                    }
+                }
+                Ok(Flow::None)
+            }
             Stmt::Return(e) => {
                 let v = if let Some(e) = e {
                     self.resolve_deferred_only(self.eval_expr(e).await?).await?
@@ -1509,16 +1631,7 @@ impl Evaluator {
             }
             Stmt::For { var, iter, body } => {
                 let itv = self.resolve_if_needed(self.eval_expr(iter).await?).await?;
-                let items = match itv {
-                    Value::List(v) => v,
-                    Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
-                    Value::Dict(m) => m.keys().map(|k| Value::Str(k.clone())).collect(),
-                    _ => {
-                        return Err(RelayError::Type(
-                            "for(each in iterable) expects list/string/dict".into(),
-                        ))
-                    }
-                };
+                let items = self.to_iter_items(itv, "for(each in iterable)")?;
 
                 for item in items {
                     let mut env = self.env.lock().await;
@@ -1535,6 +1648,29 @@ impl Evaluator {
                 }
                 Ok(Flow::None)
             }
+            Stmt::TryExcept {
+                err_name,
+                try_block,
+                except_block,
+            } => match self.eval_block(try_block).await {
+                Ok(flow) => Ok(flow),
+                Err(e) => {
+                    let mut env = self.env.lock().await;
+                    env.push();
+                    if let Some(name) = err_name {
+                        env.set(name, Value::Str(e.to_string()));
+                    }
+                    drop(env);
+
+                    let result = self.eval_block(except_block).await;
+
+                    let mut env = self.env.lock().await;
+                    env.pop();
+                    drop(env);
+
+                    result
+                }
+            },
             Stmt::FuncDef {
                 name,
                 params,
@@ -1578,6 +1714,40 @@ impl Evaluator {
                     v.push(self.resolve_if_needed(self.eval_expr(it).await?).await?);
                 }
                 Ok(Value::List(v))
+            }
+            Expr::ListComp {
+                expr,
+                var,
+                iter,
+                filter,
+            } => {
+                let itv = self.resolve_if_needed(self.eval_expr(iter).await?).await?;
+                let items = self.to_iter_items(itv, "list comprehension")?;
+                let mut out = Vec::new();
+
+                for item in items {
+                    let mut env = self.env.lock().await;
+                    env.push();
+                    env.set(var, item);
+                    drop(env);
+
+                    let should_include = if let Some(cond) = filter {
+                        let cv = self.resolve_if_needed(self.eval_expr(cond).await?).await?;
+                        cv.truthy()
+                    } else {
+                        true
+                    };
+
+                    if should_include {
+                        let v = self.resolve_if_needed(self.eval_expr(expr).await?).await?;
+                        out.push(v);
+                    }
+
+                    let mut env = self.env.lock().await;
+                    env.pop();
+                }
+
+                Ok(Value::List(out))
             }
             Expr::Dict(kvs) => {
                 let mut m = IndexMap::new();
@@ -1713,6 +1883,17 @@ impl Evaluator {
         match v {
             Value::Deferred(d) => d.resolve().await,
             other => Ok(other),
+        }
+    }
+
+    fn to_iter_items(&self, value: Value, context: &str) -> RResult<Vec<Value>> {
+        match value {
+            Value::List(v) => Ok(v),
+            Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
+            Value::Dict(m) => Ok(m.keys().map(|k| Value::Str(k.clone())).collect()),
+            _ => Err(RelayError::Type(format!(
+                "{context} expects list/string/dict"
+            ))),
         }
     }
 

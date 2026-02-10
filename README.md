@@ -45,6 +45,9 @@ Relay is designed for building high-performance web services, APIs, and network 
 - **Session Management**: Built-in session handling with HttpOnly cookies
 - **Template Rendering**: Lightweight Jinja-style templating (`{{ variable }}`)
 - **Type Hints**: Optional runtime type checking for function parameters
+- **List Comprehensions**: Python-style inline list transforms with optional filtering
+- **Destructuring Assignment**: Unpack lists/strings/dicts into multiple variables
+- **Error Handling**: `try/except` blocks for graceful runtime error recovery
 - **Concurrency Primitives**: `spawn`, `all`, `race`, `timeout`, and `cancel` for parallel execution
 
 
@@ -202,6 +205,10 @@ numbers = [1, 2, 3, 4, 5]
 mixed = [1, "two", 3.0, True]
 nested = [[1, 2], [3, 4]]
 
+// List comprehensions
+squares = [n * n for n in numbers]
+evens = [n for n in numbers if n % 2 == 0]
+
 // Access elements
 first = numbers[0]      // 1
 last = numbers[4]       // 5
@@ -223,6 +230,18 @@ age = user["age"]       // 30
 ```
 
 **Important:** Dictionary keys are automatically stringified. `{1: "value"}` becomes `{"1": "value"}`.
+
+#### Destructuring Assignment
+
+Relay supports destructuring assignment for iterables such as lists, strings, and dictionaries (dictionary keys are unpacked):
+
+```relay
+a, b, c = [10, 20, 30]
+x, y = "hi"           // x = "h", y = "i"
+k1, k2 = {"a": 1, "b": 2}
+```
+
+The number of variables must match the number of unpacked values.
 
 ### Control Flow
 
@@ -270,6 +289,27 @@ for (key in user)
 ```
 
 **Note:** For loops iterate over collection elements or dictionary keys.
+
+#### Error Handling (`try/except`)
+
+Use `try/except` to catch runtime errors and continue execution:
+
+```relay
+try
+    value = int("not-a-number")
+    print(value)
+except
+    print("Could not parse integer")
+```
+
+You can also bind the error message:
+
+```relay
+try
+    result = missing_name + 1
+except(err)
+    print("Error:", err)
+```
 
 ### Functions
 
@@ -1801,9 +1841,9 @@ Found a bug? [Open an issue](https://github.com/patx/relay-lang/issues) with:
 
 **v0.2 (Planned):**
 - [ ] Multiple file support and imports
-- [ ] List comprehensions
-- [ ] Destructuring assignment
-- [ ] Error handling with try/except
+- [x] List comprehensions
+- [x] Destructuring assignment
+- [x] Error handling with try/except
 - [ ] WebSocket support
 - [ ] Static file serving
 - [ ] Middleware support
