@@ -752,6 +752,7 @@ Define HTTP endpoints using decorators:
 - `@app.put(path)`
 - `@app.patch(path)`
 - `@app.delete(path)`
+- `@app.ws(path)`
 
 ```relay
 app = WebApp()
@@ -763,6 +764,24 @@ fn index()
 @app.post("/users")
 fn create_user(name: str, email: str)
     return {"id": 123, "name": name, "email": email}
+```
+
+#### WebSocket Routes
+
+Use `@app.ws(path)` for WebSocket upgrade endpoints.
+WebSocket handlers receive a `socket` object with:
+- `socket.recv()` → returns text (`str`), binary (`bytes`), or `None` on close
+- `socket.send(value)` → sends text (or binary when `bytes`)
+- `socket.close()` → closes the connection
+
+```relay
+@app.ws("/chat")
+fn chat_room()
+    while True
+        msg = socket.recv()
+        if (msg == None)
+            break
+        socket.send("echo: " + str(msg))
 ```
 
 #### Path Parameters
@@ -1871,7 +1890,7 @@ Found a bug? [Open an issue](https://github.com/patx/relay-lang/issues) with:
 - [x] List comprehensions
 - [x] Destructuring assignment
 - [x] Error handling with try/except
-- [ ] WebSocket support
+- [x] WebSocket support
 - [X] Static file serving
 - [X] Middleware support
 
