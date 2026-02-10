@@ -1,3 +1,4 @@
+
 // relay.rs — Relay v0.1 single-file interpreter (Tokio runtime)
 // - Indentation-based parser (spaces only, 4 per level)
 // - AST + async evaluator
@@ -18,8 +19,8 @@ use std::{
 };
 
 use axum::{
-    extract::{Method, Path, Query},
-    http::{HeaderMap, StatusCode},
+    extract::{Path, Query},
+    http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json as AxumJson, Router,
