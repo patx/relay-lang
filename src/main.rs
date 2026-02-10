@@ -32,7 +32,7 @@ use axum::{
 use async_recursion::async_recursion;
 use futures::{stream::TryStreamExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
-use minijinja::{context, Environment};
+use minijinja::Environment;
 use mongodb::{
     bson::{self, Bson, Document},
     Client as MongoClient, Collection as MongoCollection, Database as MongoDatabase,
@@ -1481,8 +1481,10 @@ fn render_template(s: &str, locals: &HashMap<String, Value>) -> RResult<String> 
         ctx.insert(key.clone(), value_to_json(value));
     }
 
+    let ctx = J::Object(ctx);
+
     Environment::new()
-        .render_str(s, context!(..ctx))
+        .render_str(s, &ctx)
         .map_err(|e| RelayError::Runtime(format!("Template render error: {e}")))
 }
 
