@@ -1,4 +1,4 @@
-
+#![allow(warnings)]
 // relay.rs — Relay v0.1 single-file interpreter (Tokio runtime)
 // - Indentation-based parser (spaces only, 4 per level)
 // - AST + async evaluator

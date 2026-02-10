@@ -1,20 +1,2 @@
-app = WebApp()
-server = WebServer()
-
-
-@app.get("/")
-fn index()
-    return read_file("index.html")
-
-@app.get("/<pid>")
-fn view_paste(pid)
-    paste = db.find_one({"_id": pid})
-    return paste["paste_content"]
-
-@app.post("/")
-fn new_paste(paste)
-    new_paste = db.insert_one({"paste_content": paste})
-    pid = new_paste["_id"]
-    app.redirect("/<pid>")
-
-server.run(app) # a comment
+sleep(2000, print("non blocking"))
+print("see")
