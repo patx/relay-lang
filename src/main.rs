@@ -451,10 +451,9 @@ impl<'a> Lexer<'a> {
                     if is_ident_start(c) {
                         let id = self.read_ident();
                         let k = match id.as_str() {
-                            "fn" | "if" | "for" | "while" | "return" | "try" | "except"
-                            | "import" | "True" | "False" | "None" | "str" | "int" | "float" => {
-                                Tok::Keyword(id)
-                            }
+                            "fn" | "if" | "else" | "for" | "while" | "return" | "try"
+                            | "except" | "import" | "True" | "False" | "None" | "str" | "int"
+                            | "float" => Tok::Keyword(id),
                             _ => Tok::Ident(id),
                         };
                         out.push(self.wrap(k));
@@ -804,7 +803,7 @@ impl Parser {
         let then_block = self.parse_block()?;
         let mut else_block = Vec::new();
         self.skip_newlines();
-        if self.peek_ident_string().as_deref() == Some("else") {
+        if self.peek_kw("else") || self.peek_ident_string().as_deref() == Some("else") {
             self.bump();
             self.expect_newline()?;
             else_block = self.parse_block()?;
