@@ -193,6 +193,8 @@ enum UnaryOp {
 
 #[derive(Debug, Clone, Copy)]
 enum BinOp {
+    And,
+    Or,
     Add,
     Sub,
     Mul,
@@ -441,6 +443,22 @@ impl<'a> Lexer<'a> {
                 '+' | '-' | '*' | '/' => {
                     self.advance_char();
                     Tok::Op(c.to_string())
+                }
+                '&' => {
+                    if self.peek2("&&") {
+                        self.advance_n(2);
+                        Tok::Op("&&".into())
+                    } else {
+                        return Err(self.err("Unexpected '&'"));
+                    }
+                }
+                '|' => {
+                    if self.peek2("||") {
+                        self.advance_n(2);
+                        Tok::Op("||".into())
+                    } else {
+                        return Err(self.err("Unexpected '|'"));
+                    }
                 }
                 _ => {
                     if c.is_ascii_digit() {
@@ -1138,6 +1156,8 @@ impl Parser {
         }) = self.t.get(self.i)
         {
             let (b, p) = match op.as_str() {
+                "&&" => (BinOp::And, 1),
+                "||" => (BinOp::Or, 0),
                 "==" => (BinOp::Eq, 2),
                 "!=" => (BinOp::Ne, 2),
                 "<" => (BinOp::Lt, 2),
@@ -1151,6 +1171,12 @@ impl Parser {
                 _ => return None,
             };
             Some((b, p))
+        } else if let Some(id) = self.peek_ident_string() {
+            match id.as_str() {
+                "and" => Some((BinOp::And, 1)),
+                "or" => Some((BinOp::Or, 0)),
+                _ => None,
+            }
         } else {
             None
         }
@@ -2002,9 +2028,31 @@ impl Evaluator {
             }
 
             Expr::BinOp { left, op, right } => {
-                let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
-                let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
-                eval_bin(*op, l, r)
+                match op {
+                    BinOp::And => {
+                        let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
+                        if !l.truthy() {
+                            Ok(Value::Bool(false))
+                        } else {
+                            let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
+                            Ok(Value::Bool(r.truthy()))
+                        }
+                    }
+                    BinOp::Or => {
+                        let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
+                        if l.truthy() {
+                            Ok(Value::Bool(true))
+                        } else {
+                            let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
+                            Ok(Value::Bool(r.truthy()))
+                        }
+                    }
+                    _ => {
+                        let l = self.resolve_if_needed(self.eval_expr(left).await?).await?;
+                        let r = self.resolve_if_needed(self.eval_expr(right).await?).await?;
+                        eval_bin(*op, l, r)
+                    }
+                }
             }
 
             Expr::Unary { op, expr } => {
