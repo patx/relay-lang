@@ -803,7 +803,7 @@ impl Parser {
         let then_block = self.parse_block()?;
         let mut else_block = Vec::new();
         self.skip_newlines();
-        if self.peek_kw("else") || self.peek_ident_string().as_deref() == Some("else") {
+        if self.peek_else() {
             self.bump();
             self.expect_newline()?;
             else_block = self.parse_block()?;
@@ -922,6 +922,19 @@ impl Parser {
         self.skip_newlines();
         let mut out = Vec::new();
         while !self.eof() && !self.peek_is(&Tok::Dedent) {
+            if self.peek_else() {
+                let Some(Stmt::If { else_block, .. }) = out.last_mut() else {
+                    return Err(self.err_here("'else' without matching if"));
+                };
+                if !else_block.is_empty() {
+                    return Err(self.err_here("Multiple 'else' clauses for if"));
+                }
+                self.bump(); // else
+                self.expect_newline()?;
+                *else_block = self.parse_block()?;
+                self.skip_newlines();
+                continue;
+            }
             out.push(self.parse_stmt()?);
             self.skip_newlines();
         }
@@ -1170,6 +1183,9 @@ impl Parser {
     }
     fn peek_kw(&self, s: &str) -> bool {
         matches!(self.peek(), Some(Token { kind: Tok::Keyword(k), .. }) if k == s)
+    }
+    fn peek_else(&self) -> bool {
+        self.peek_kw("else") || self.peek_ident_string().as_deref() == Some("else")
     }
     fn expect_kw(&mut self, s: &str) -> RResult<()> {
         if self.peek_kw(s) {

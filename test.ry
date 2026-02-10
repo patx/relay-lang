@@ -1,15 +1,7 @@
-// Serial: 5 seconds total
-sleep(1000, "a")
-sleep(1000, "b")
-sleep(1000, "c")
-sleep(1000, "d")
-sleep(1000, "e")
+x = 10
 
-// Parallel: 1 second total
-all([
-    spawn(sleep(1000, "a")),
-    spawn(sleep(1000, "b")),
-    spawn(sleep(1000, "c")),
-    spawn(sleep(1000, "d")),
-    spawn(sleep(1000, "e"))
-])
+if (x > 5)
+    print("x is greater than 5")
+else
+    print("x is 5 or less")
+
