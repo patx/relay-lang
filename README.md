@@ -1910,7 +1910,9 @@ Found a bug? [Open an issue](https://github.com/patx/relay-lang/issues) with:
 - [ ] Standard library expansion
 - [ ] SQL database support (PostgreSQL, SQLite)
 - [ ] Redis integration
-- [ ] GraphQL support
+- [ ] Interactive REPL with syntax highlighting
+- [ ] Web framework improvements (routing groups, validation)
+- [ ] Worker processes for CPU-heavy tasks
 
 
 ## License
