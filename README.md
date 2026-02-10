@@ -1,6 +1,6 @@
 # Relay Programming Language
 
-**Version:** 0.1  
+**Version:** 0.1
 **License:** MIT
 
 > A networking-first, async-by-default programming language with Python-like syntax and Node.js-style non-blocking semantics.
@@ -162,11 +162,11 @@ fn example()
 - Indentation must be exactly 4 spaces per level
 - No tabs allowed
 - Function bodies, control flow blocks, and loops all require indentation
-- Comments start with `#` and continue to the end of the line
+- Comments start with `//` and continue to the end of the line
 
 ```relay
-# This is a comment
-x = 42  # This is also a comment
+// This is a comment
+x = 42  // This is also a comment
 ```
 
 ### Data Types
@@ -174,23 +174,23 @@ x = 42  # This is also a comment
 #### Primitives
 
 ```relay
-# Integers
+// Integers
 age = 25
 count = -10
 
-# Floats
+// Floats
 pi = 3.14159
 temperature = -273.15
 
-# Strings
+// Strings
 name = "Relay"
 message = "Hello, world!"
 
-# Booleans
+// Booleans
 is_active = True
 is_complete = False
 
-# None
+// None
 result = None
 ```
 
@@ -202,11 +202,11 @@ numbers = [1, 2, 3, 4, 5]
 mixed = [1, "two", 3.0, True]
 nested = [[1, 2], [3, 4]]
 
-# Access elements
-first = numbers[0]      # 1
-last = numbers[4]       # 5
+// Access elements
+first = numbers[0]      // 1
+last = numbers[4]       // 5
 
-# Lists are mutable
+// Lists are mutable
 numbers[0] = 10
 ```
 
@@ -214,12 +214,12 @@ numbers[0] = 10
 ```relay
 user = {"name": "Ada", "age": 30, "active": True}
 
-# Access values
-name = user["name"]     # "Ada"
-age = user["age"]       # 30
+// Access values
+name = user["name"]     // "Ada"
+age = user["age"]       // 30
 
-# Keys are always strings
-# Values can be any type
+// Keys are always strings
+// Values can be any type
 ```
 
 **Important:** Dictionary keys are automatically stringified. `{1: "value"}` becomes `{"1": "value"}`.
@@ -230,14 +230,9 @@ age = user["age"]       # 30
 
 ```relay
 if (condition)
-    # then block
+    // then block
     print("condition is true")
-else
-    # else block
-    print("condition is false")
 ```
-
-**Note:** The `else` block is optional.
 
 ```relay
 if (x > 0)
@@ -258,17 +253,17 @@ Augmented assignment operators are supported:
 i = 0
 while (i < 5)
     print(i)
-    i =+ 1  # equivalent to i = i + 1
+    i =+ 1  // equivalent to i = i + 1
 ```
 
 #### For Loops
 
 ```relay
-# Iterate over lists
+// Iterate over lists
 for (item in [1, 2, 3, 4, 5])
     print(item)
 
-# Iterate over dictionary keys
+// Iterate over dictionary keys
 user = {"name": "Ada", "age": 30}
 for (key in user)
     print(key + ": " + str(user[key]))
@@ -285,7 +280,7 @@ fn greet(name)
     return "Hello, " + name
 
 message = greet("World")
-print(message)  # Hello, World
+print(message)  // Hello, World
 ```
 
 #### Default Parameters
@@ -294,8 +289,8 @@ print(message)  # Hello, World
 fn greet(name: str = "World")
     return "Hello, " + name
 
-print(greet())          # Hello, World
-print(greet("Relay"))   # Hello, Relay
+print(greet())          // Hello, World
+print(greet("Relay"))   // Hello, Relay
 ```
 
 #### Type Hints
@@ -306,8 +301,8 @@ Relay supports runtime type checking for parameters:
 fn add(a: int, b: int)
     return a + b
 
-result = add(5, 10)         # OK
-result = add("5", "10")     # Type error!
+result = add(5, 10)         // OK
+result = add("5", "10")     // Type error!
 ```
 
 **Supported Types:**
@@ -333,7 +328,7 @@ fn calculate()
     return 42
 
 fn do_work()
-    # No explicit return = returns None
+    // No explicit return = returns None
     print("Working...")
 ```
 
@@ -361,9 +356,9 @@ delayed
 When you assign the result of an async operation, you get a `Deferred` value. The operation starts immediately but doesn't block:
 
 ```relay
-x = sleep(1000, 10)     # Returns immediately with Deferred<10>
-y = sleep(1000, 20)     # Returns immediately with Deferred<20>
-print(x + y)            # Waits for both, then prints 30
+x = sleep(1000, 10)     // Returns immediately with Deferred<10>
+y = sleep(1000, 20)     // Returns immediately with Deferred<20>
+print(x + y)            // Waits for both, then prints 30
 ```
 
 Both sleeps start at the same time, so this takes ~1 second, not 2.
@@ -403,20 +398,20 @@ fn work(n)
 
 task1 = spawn(work(5))
 task2 = spawn(work(10))
-result1 = task1.join()  # Wait for completion
+result1 = task1.join()  // Wait for completion
 result2 = task2.join()
 ```
 
 **`all(tasks)`** - Wait for all tasks to complete:
 ```relay
 tasks = [spawn(work(1)), spawn(work(2)), spawn(work(3))]
-results = all(tasks)    # [2, 4, 6]
+results = all(tasks)    // [2, 4, 6]
 ```
 
 **`race(tasks)`** - Wait for the first task to complete:
 ```relay
 tasks = [spawn(sleep(1000, "slow")), spawn(sleep(100, "fast"))]
-winner = race(tasks)    # "fast"
+winner = race(tasks)    // "fast"
 ```
 
 **`timeout(expr, ms)`** - Add a timeout to any operation:
@@ -440,38 +435,38 @@ cancel(task)
 Print values to stdout. Multiple arguments are printed space-separated.
 
 ```relay
-print("Hello")                  # Hello
-print("x =", 42)               # x = 42
-print("a", "b", "c")           # a b c
+print("Hello")                  // Hello
+print("x =", 42)                // x = 42
+print("a", "b", "c")            // a b c
 ```
 
 #### `str(value)`
 Convert any value to a string.
 
 ```relay
-str(123)        # "123"
-str(3.14)       # "3.14"
-str(True)       # "True"
-str([1, 2, 3])  # "[1, 2, 3]"
+str(123)        // "123"
+str(3.14)       // "3.14"
+str(True)       // "True"
+str([1, 2, 3])  // "[1, 2, 3]"
 ```
 
 #### `int(value)`
 Convert a value to an integer.
 
 ```relay
-int("42")       # 42
-int(3.9)        # 3
-int(True)       # 1
-int("invalid")  # Runtime error
+int("42")       // 42
+int(3.9)        // 3
+int(True)       // 1
+int("invalid")  // Runtime error
 ```
 
 #### `float(value)`
 Convert a value to a float.
 
 ```relay
-float("3.14")   # 3.14
-float(42)       # 42.0
-float("2.5e3")  # 2500.0
+float("3.14")   // 3.14
+float(42)       // 42.0
+float("2.5e3")  // 2500.0
 ```
 
 ### Async & Concurrency
@@ -482,8 +477,8 @@ float("2.5e3")  # 2500.0
 Sleep for the specified duration, then resolve to `value`.
 
 ```relay
-sleep(1000, print("done"))          # Print after 1 second
-result = sleep(2000, 42)            # Wait 2s, result = 42
+sleep(1000, print("done"))          // Print after 1 second
+result = sleep(2000, 42)            // Wait 2s, result = 42
 ```
 
 #### `spawn(expression)`
@@ -493,7 +488,7 @@ Execute an expression in parallel. Returns a `Task` object.
 
 ```relay
 task = spawn(expensive_computation())
-# Do other work...
+// Do other work...
 result = task.join()
 ```
 
@@ -507,7 +502,7 @@ Wait for all tasks to complete. Returns results in order.
 
 ```relay
 tasks = [spawn(work(1)), spawn(work(2)), spawn(work(3))]
-results = all(tasks)  # Wait for all, returns [result1, result2, result3]
+results = all(tasks)  // Wait for all, returns [result1, result2, result3]
 ```
 
 #### `race(tasks)`
@@ -520,7 +515,7 @@ tasks = [
     spawn(http.get("https://api1.com")),
     spawn(http.get("https://api2.com"))
 ]
-fastest = race(tasks)  # Returns whichever completes first
+fastest = race(tasks)  // Returns whichever completes first
 ```
 
 #### `timeout(expression, milliseconds)`
@@ -529,7 +524,7 @@ fastest = race(tasks)  # Returns whichever completes first
 Add a timeout to any async operation.
 
 ```relay
-result = timeout(http.get("https://slow.com"), 5000)  # 5 second timeout
+result = timeout(http.get("https://slow.com"), 5000)  // 5 second timeout
 ```
 
 If the timeout is exceeded, a runtime error is raised.
@@ -600,8 +595,8 @@ Send a GET request.
 ```relay
 http = Http()
 resp = http.get("https://api.example.com/users")
-print(resp.status)  # 200
-print(resp.text)    # Response body as string
+print(resp.status)  // 200
+print(resp.text)    // Response body as string
 ```
 
 **With headers:**
@@ -666,10 +661,10 @@ HTTP responses have the following properties:
 http = Http()
 resp = http.get("https://api.github.com/users/octocat")
 
-print(resp.status)                    # 200
-print(resp.headers["content-type"])   # application/json
+print(resp.status)                    // 200
+print(resp.headers["content-type"])   // application/json
 data = resp.json()
-print(data["login"])                  # octocat
+print(data["login"])                  // octocat
 ```
 
 ### Web Server
@@ -725,17 +720,17 @@ Handler parameters are automatically bound from:
 3. **Query parameters** (lowest priority)
 
 ```relay
-# GET /search?q=relay&limit=10
+// GET /search?q=relay&limit=10
 @app.get("/search")
 fn search(q: str, limit: int = 20)
     return {"query": q, "limit": limit}
 
-# POST /users with JSON body {"name": "Ada", "email": "ada@example.com"}
+// POST /users with JSON body {"name": "Ada", "email": "ada@example.com"}
 @app.post("/users")
 fn create_user(name: str, email: str)
     return {"name": name, "email": email}
 
-# GET /users/123
+// GET /users/123
 @app.get("/users/<user_id>")
 fn get_user(user_id)
     return {"id": user_id}
@@ -750,13 +745,13 @@ Use type hints to enforce parameter types and enable automatic coercion:
 fn calculate(a: int, b: int)
     return {"result": a + b}
 
-# POST /calculate with {"a": "5", "b": "10"}
-# Automatically converts strings to ints: {"result": 15}
+// POST /calculate with {"a": "5", "b": "10"}
+// Automatically converts strings to ints: {"result": 15}
 ```
 
 **Supported types:**
 - `str` - String
-- `int` - Integer  
+- `int` - Integer
 - `float` - Float
 - `json` or `Json` - Full JSON body (for POST/PUT/PATCH)
 
@@ -767,11 +762,11 @@ Every handler has access to a `request` dictionary:
 ```relay
 @app.get("/debug")
 fn debug_request()
-    print(request["method"])    # GET
-    print(request["path"])      # /debug
-    print(request["query"])     # Query parameters dict
-    print(request["headers"])   # Headers dict
-    print(request["cookies"])   # Cookies dict
+    print(request["method"])    // GET
+    print(request["path"])      // /debug
+    print(request["query"])     // Query parameters dict
+    print(request["headers"])   // Headers dict
+    print(request["cookies"])   // Cookies dict
     return "OK"
 ```
 
@@ -827,21 +822,21 @@ Handlers can return various types:
 ```relay
 @app.get("/api/user")
 fn get_user()
-    return {"name": "Ada", "id": 123}  # Auto-serialized to JSON
+    return {"name": "Ada", "id": 123}  // Auto-serialized to JSON
 ```
 
 **Plain text:**
 ```relay
 @app.get("/")
 fn index()
-    return "Hello, World!"  # Content-Type: text/plain
+    return "Hello, World!"  // Content-Type: text/plain
 ```
 
 **HTML:**
 ```relay
 @app.get("/")
 fn index()
-    return "<h1>Welcome</h1>"  # Content-Type: text/html
+    return "<h1>Welcome</h1>"  // Content-Type: text/html
 ```
 
 **Custom Response:**
@@ -885,7 +880,7 @@ Create a redirect response.
 ```relay
 @app.post("/submit")
 fn submit(data)
-    # Process data...
+    // Process data...
     return app.redirect("/success")
 ```
 
@@ -900,7 +895,7 @@ version = "0.1"
 @app.get("/")
 fn index()
     return "<h1>{{ name }} v{{ version }}</h1>"
-    # Renders: <h1>Relay v0.1</h1>
+    // Renders: <h1>Relay v0.1</h1>
 ```
 
 Templates have access to all variables in the handler's scope.
@@ -923,7 +918,7 @@ server = WebServer()
 fn index()
     return "Hello, World!"
 
-server.run(app)  # Starts server on 127.0.0.1:3000
+server.run(app)  // Starts server on 127.0.0.1:3000
 ```
 
 **Configuration:**
@@ -949,13 +944,13 @@ mongodb://[username:password@]host[:port][/database]
 
 Examples:
 ```relay
-# Local MongoDB
+// Local MongoDB
 mongo = Mongo("mongodb://localhost:27017")
 
-# MongoDB Atlas
+// MongoDB Atlas
 mongo = Mongo("mongodb+srv://user:pass@cluster.mongodb.net/")
 
-# With authentication
+// With authentication
 mongo = Mongo("mongodb://admin:password@localhost:27017")
 ```
 
@@ -987,7 +982,7 @@ Insert a single document.
 ```relay
 users = db.collection("users")
 result = users.insert_one({"name": "Ada", "email": "ada@example.com"})
-print(result["inserted_id"])  # ObjectId as string
+print(result["inserted_id"])  // ObjectId as string
 ```
 
 #### `collection.insert_many(documents)`
@@ -1002,7 +997,7 @@ docs = [
     {"name": "Grace", "email": "grace@example.com"}
 ]
 result = users.insert_many(docs)
-print(result["inserted_ids"])  # List of ObjectIds
+print(result["inserted_ids"])  // List of ObjectIds
 ```
 
 #### `collection.find_one(filter)`
@@ -1019,13 +1014,13 @@ if (user != None)
 
 **Filter examples:**
 ```relay
-# Exact match
+// Exact match
 user = users.find_one({"name": "Ada"})
 
-# Multiple conditions (implicit AND)
+// Multiple conditions (implicit AND)
 user = users.find_one({"name": "Ada", "active": True})
 
-# By ObjectId
+// By ObjectId
 user = users.find_one({"_id": "507f1f77bcf86cd799439011"})
 ```
 
@@ -1057,18 +1052,18 @@ result = users.update_one(
     {"email": "ada@example.com"},
     {"$set": {"active": True}}
 )
-print(result["modified_count"])  # 1
+print(result["modified_count"])  // 1
 ```
 
 **Update operators:**
 ```relay
-# Set fields
+// Set fields
 users.update_one({"_id": id}, {"$set": {"status": "active"}})
 
-# Increment
+// Increment
 users.update_one({"_id": id}, {"$inc": {"login_count": 1}})
 
-# Unset fields
+// Unset fields
 users.update_one({"_id": id}, {"$unset": {"temp_field": ""}})
 ```
 
@@ -1094,7 +1089,7 @@ Delete a single document.
 ```relay
 users = db.collection("users")
 result = users.delete_one({"email": "ada@example.com"})
-print(result["deleted_count"])  # 1 or 0
+print(result["deleted_count"])  // 1 or 0
 ```
 
 #### `collection.delete_many(filter)`
@@ -1105,7 +1100,7 @@ Delete multiple documents.
 ```relay
 users = db.collection("users")
 result = users.delete_many({"active": False})
-print(result["deleted_count"])  # Number of deleted documents
+print(result["deleted_count"])  // Number of deleted documents
 ```
 
 
@@ -1180,7 +1175,7 @@ fn fetch_user(user_id)
     resp = http.get("https://api.example.com/users/" + str(user_id))
     return resp.json()
 
-# Fetch 5 users concurrently
+// Fetch 5 users concurrently
 tasks = []
 i = 1
 while (i <= 5)
@@ -1231,7 +1226,7 @@ fn login(username: str, password: str)
     if (user == None)
         return Response("Invalid credentials", status=401)
     
-    # In production, use proper password hashing!
+    // In production, use proper password hashing!
     if (user["password"] == password)
         session["authenticated"] = True
         session["username"] = username
@@ -1306,7 +1301,7 @@ http = Http()
 fn fetch_with_timeout(url)
     return timeout(http.get(url), 5000)
 
-# Try to fetch with 5 second timeout
+// Try to fetch with 5 second timeout
 result = fetch_with_timeout("https://slow-api.com/data")
 print(result.text)
 ```
@@ -1316,7 +1311,7 @@ print(result.text)
 ```relay
 http = Http()
 
-# Fetch from multiple mirrors, use whichever responds first
+// Fetch from multiple mirrors, use whichever responds first
 mirrors = [
     "https://mirror1.example.com/data",
     "https://mirror2.example.com/data",
@@ -1339,12 +1334,12 @@ fn process_item(item)
 
 items = [1, 2, 3, 4, 5]
 
-# Spawn all tasks without waiting
+// Spawn all tasks without waiting
 for (item in items)
     spawn(process_item(item))
 
 print("All tasks started, continuing...")
-# Tasks run in background
+// Tasks run in background
 ```
 
 
@@ -1372,15 +1367,15 @@ Relay is built on:
 When you call an async function, Relay immediately starts the operation and returns a `Deferred` value:
 
 ```relay
-# This starts the HTTP request immediately
+// This starts the HTTP request immediately
 response = http.get("https://api.example.com")
-# response is Deferred<Response>
+// response is Deferred<Response>
 
-# The request is already in-flight here
+// The request is already in-flight here
 print("Request started")
 
-# Only when we access response.status does it wait
-print(response.status)  # <-- Blocks here if not complete
+// Only when we access response.status does it wait
+print(response.status)  // <-- Blocks here if not complete
 ```
 
 #### Auto-Resolution
@@ -1390,19 +1385,19 @@ print(response.status)  # <-- Blocks here if not complete
 1. **Used in operations:**
 ```relay
 x = sleep(1000, 10)
-y = x + 5  # Waits for x to resolve
+y = x + 5  // Waits for x to resolve
 ```
 
 2. **Passed to functions:**
 ```relay
 result = sleep(1000, 42)
-print(result)  # Waits before printing
+print(result)  // Waits before printing
 ```
 
 3. **Used in control flow:**
 ```relay
 data = http.get("https://api.example.com")
-if (data.status == 200)  # Waits before comparison
+if (data.status == 200)  // Waits before comparison
     print("Success")
 ```
 
@@ -1410,7 +1405,7 @@ if (data.status == 200)  # Waits before comparison
 ```relay
 resp = http.get("https://api.example.com")
 json_data = resp.json()
-print(json_data["key"])  # Waits for json() before indexing
+print(json_data["key"])  // Waits for json() before indexing
 ```
 
 #### Expression Statements
@@ -1418,15 +1413,15 @@ print(json_data["key"])  # Waits for json() before indexing
 Expression statements (expressions not assigned to variables) run without blocking:
 
 ```relay
-# This starts the sleep but doesn't wait
+// This starts the sleep but doesn't wait
 sleep(1000, print("delayed"))
 
-# This prints immediately
+// This prints immediately
 print("immediate")
 
-# Output:
-# immediate
-# delayed (after 1 second)
+// Output:
+// immediate
+// delayed (after 1 second)
 ```
 
 ### Concurrency Model
@@ -1434,12 +1429,12 @@ print("immediate")
 Relay uses Tokio's work-stealing scheduler to run tasks concurrently:
 
 ```relay
-# Start 3 HTTP requests concurrently
+// Start 3 HTTP requests concurrently
 task1 = spawn(http.get("https://api1.com"))
 task2 = spawn(http.get("https://api2.com"))
 task3 = spawn(http.get("https://api3.com"))
 
-# Wait for all to complete
+// Wait for all to complete
 results = all([task1, task2, task3])
 ```
 
@@ -1470,14 +1465,14 @@ Sessions are stored server-side in an in-memory hash map:
 MongoDB operations return `Deferred` values that resolve when the database operation completes:
 
 ```relay
-# This starts the query immediately
+// This starts the query immediately
 users = collection.find({"active": True})
 
-# The query is running in the background here
+// The query is running in the background here
 print("Query started")
 
-# Only when we iterate do we wait for results
-for (user in users)  # <-- Blocks here
+// Only when we iterate do we wait for results
+for (user in users)  // <-- Blocks here
     print(user["name"])
 ```
 
@@ -1489,7 +1484,7 @@ for (user in users)  # <-- Blocks here
 
 Instead of:
 ```relay
-# Sequential (slow)
+// Sequential (slow)
 result1 = http.get("https://api1.com")
 result2 = http.get("https://api2.com")
 result3 = http.get("https://api3.com")
@@ -1497,7 +1492,7 @@ result3 = http.get("https://api3.com")
 
 Do:
 ```relay
-# Concurrent (fast)
+// Concurrent (fast)
 tasks = [
     spawn(http.get("https://api1.com")),
     spawn(http.get("https://api2.com")),
@@ -1537,14 +1532,14 @@ fn get_user(user_id)
 Don't try to maintain state in global variables. Use sessions:
 
 ```relay
-# Bad
+// Bad
 current_user = None
 
 @app.post("/login")
 fn login(username)
-    current_user = username  # Won't work across requests
+    current_user = username  // Won't work across requests
 
-# Good
+// Good
 @app.post("/login")
 fn login(username)
     session["user"] = username
@@ -1556,7 +1551,7 @@ Always add timeouts to external HTTP requests:
 
 ```relay
 fn fetch_data(url)
-    return timeout(http.get(url), 10000)  # 10 second timeout
+    return timeout(http.get(url), 10000)  // 10 second timeout
 ```
 
 ### 6. Structure Large Applications
@@ -1567,28 +1562,28 @@ Split handlers into logical groups:
 app = WebApp()
 server = WebServer()
 
-# Auth routes
+// Auth routes
 @app.post("/auth/login")
 fn login(username, password)
-    # ...
+    // ...
 
 @app.post("/auth/logout")
 fn logout()
-    # ...
+    // ...
 
-# User routes
+// User routes
 @app.get("/users/<user_id>")
 fn get_user(user_id)
-    # ...
+    // ...
 
 @app.post("/users")
 fn create_user(name, email)
-    # ...
+    // ...
 
-# Post routes
+// Post routes
 @app.get("/posts")
 fn list_posts()
-    # ...
+    // ...
 
 server.run(app)
 ```
@@ -1598,10 +1593,10 @@ server.run(app)
 For cleaner counter increments:
 
 ```relay
-# Instead of
+// Instead of
 i = i + 1
 
-# Use
+// Use
 i =+ 1
 ```
 
@@ -1635,13 +1630,13 @@ fn get_post(post_id)
 **Fix:** Ensure all indentation uses 4 spaces (not tabs, not 2 spaces).
 
 ```relay
-# Wrong
+// Wrong
 fn example()
-  print("hello")  # 2 spaces
+  print("hello")  // 2 spaces
 
-# Right
+// Right
 fn example()
-    print("hello")  # 4 spaces
+    print("hello")  // 4 spaces
 ```
 
 #### "Tabs are not allowed (spaces only)"
@@ -1657,10 +1652,10 @@ fn example()
 **Fix:** Use explicit type conversion:
 
 ```relay
-# Wrong
+// Wrong
 x = 10 + "5"
 
-# Right
+// Right
 x = 10 + int("5")
 ```
 
@@ -1671,11 +1666,11 @@ x = 10 + int("5")
 **Fix:** Ensure variables are assigned before use:
 
 ```relay
-# Wrong
+// Wrong
 print(x)
 x = 10
 
-# Right
+// Right
 x = 10
 print(x)
 ```
@@ -1697,19 +1692,19 @@ if (len(items) > 5)
 1. **Use print statements:** Relay's simplest debugging tool
 ```relay
 fn process_data(data)
-    print("Processing:", data)  # Debug output
+    print("Processing:", data)  // Debug output
     result = transform(data)
-    print("Result:", result)    # Debug output
+    print("Result:", result)   // Debug output
     return result
 ```
 
 2. **Check async resolution:** If something seems to hang, check if you're waiting for a `Deferred` value
 ```relay
-# This might hang if the HTTP request never completes
+// This might hang if the HTTP request never completes
 result = http.get("https://unreachable.com")
 print(result.status)
 
-# Add a timeout:
+// Add a timeout:
 result = timeout(http.get("https://unreachable.com"), 5000)
 ```
 
@@ -1729,24 +1724,24 @@ fn debug()
 
 1. **Batch database operations:** Use `insert_many` instead of multiple `insert_one` calls
 ```relay
-# Slow
+// Slow
 for (item in items)
     collection.insert_one(item)
 
-# Fast
+// Fast
 collection.insert_many(items)
 ```
 
 2. **Use `spawn` for I/O-heavy tasks:** Parallelize independent operations
 ```relay
-# Serial: 5 seconds total
+// Serial: 5 seconds total
 sleep(1000, "a")
 sleep(1000, "b")
 sleep(1000, "c")
 sleep(1000, "d")
 sleep(1000, "e")
 
-# Parallel: 1 second total
+// Parallel: 1 second total
 all([
     spawn(sleep(1000, "a")),
     spawn(sleep(1000, "b")),
@@ -1765,17 +1760,17 @@ Contributions are welcome! Here's how to get started:
 ### Development Setup
 
 ```bash
-# Clone the repo
+// Clone the repo
 git clone https://github.com/yourusername/relay.git
 cd relay
 
-# Build in debug mode
+// Build in debug mode
 cargo build
 
-# Run tests
+// Run tests
 cargo test
 
-# Run with examples
+// Run with examples
 cargo run -- examples/hello.ry
 ```
 

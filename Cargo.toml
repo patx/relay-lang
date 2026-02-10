@@ -16,5 +16,5 @@ tower-http = "0.5"
 html-escape = "0.2"
 indexmap = "2"
 async-recursion = "1"
-mongodb = { version = "2.8", default-features = false, features = ["tokio-runtime", "sync", "rustls-tls"] }
+mongodb = { version = "2.8", features = ["tokio-runtime"] }
 futures = "0.3"
