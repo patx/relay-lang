@@ -170,6 +170,8 @@ sleep(1000, "done")
 print("started")
 ```
 
+Use `printnow(...)` when you want eager evaluation and immediate output.
+
 ### Deferred values resolve when needed
 
 ```relay
