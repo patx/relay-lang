@@ -5,153 +5,82 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Relay</title>
   <meta name="description" content="Async-by-default programming language with Python-like syntax. No await. Built-in web server and HTTP client."/>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --bg: #0a0a0a;
-      --fg: #e0e0e0;
-      --fg-dim: #a0a0a0;
-      --accent: #4ea8de;
-      --code-bg: #111111;
-      --border: #222;
-    }
 
-    [data-theme="light"] {
-      --bg: #ffffff;
-      --fg: #111111;
-      --fg-dim: #555;
-      --accent: #0066cc;
-      --code-bg: #f5f5f5;
-      --border: #ddd;
-    }
+  <style>
+    :root { color-scheme: light dark; }
 
     body {
       margin: 0;
-      padding: 0;
-      font-family: system-ui, sans-serif;
-      background: var(--bg);
-      color: var(--fg);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       line-height: 1.6;
+      padding: 24px;
+      max-width: 880px;
+      margin-inline: auto;
     }
 
     header {
-      border-bottom: 1px solid var(--border);
-      padding: 1rem 2rem;
       display: flex;
-      justify-content: space-between;
       align-items: center;
-      background: var(--bg);
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid rgba(127,127,127,.25);
+      margin-bottom: 32px;
     }
 
-    .logo {
-      font-size: 1.6rem;
-      font-weight: bold;
-    }
+    .logo { font-weight: 700; letter-spacing: .2px; }
+    .logo span { opacity: .6; }
 
-    .logo span {
-      color: var(--accent);
-    }
+    h1 { font-size: clamp(2rem, 4vw, 3rem); margin: 0 0 8px; }
+    .tagline { margin: 0 0 20px; opacity: .75; }
 
-    button {
-      background: none;
-      border: 1px solid var(--border);
-      color: var(--fg);
-      padding: 0.5rem 1rem;
+    .buttons { display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 44px; }
+
+    a.btn, button.btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border: 1px solid rgba(127,127,127,.35);
+      border-radius: 10px;
+      text-decoration: none;
+      color: inherit;
+      background: transparent;
       cursor: pointer;
     }
 
-    main {
-      max-width: 900px;
-      margin: 0 auto;
-      padding: 3rem 1.5rem;
+    a.btn.primary {
+      background: rgba(127,127,127,.12);
     }
 
-    h1 {
-      font-size: 3.2rem;
-      text-align: center;
-      margin-bottom: 0.8rem;
-    }
-
-    .tagline {
-      text-align: center;
-      color: var(--fg-dim);
-      font-size: 1.3rem;
-      margin-bottom: 2.5rem;
-    }
-
-    .buttons {
-      text-align: center;
-      margin-bottom: 4rem;
-    }
-
-    .btn {
-      display: inline-block;
-      padding: 0.8rem 1.6rem;
-      margin: 0.5rem;
-      border: 1px solid var(--accent);
-      color: var(--accent);
-      text-decoration: none;
-    }
-
-    .btn.primary {
-      background: var(--accent);
-      color: white;
-      border-color: var(--accent);
-    }
-
-    section {
-      margin: 5rem 0;
-    }
-
-    h2 {
-      font-size: 2rem;
-      margin-bottom: 1.5rem;
-      text-align: center;
-    }
+    section { margin: 48px 0; }
+    h2 { font-size: 1.3rem; margin: 0 0 14px; }
 
     pre {
-      background: var(--code-bg);
-      padding: 1.2rem;
+      margin: 0;
+      padding: 14px;
+      border: 1px solid rgba(127,127,127,.25);
+      border-radius: 12px;
       overflow-x: auto;
-      border: 1px solid var(--border);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.95rem;
-      line-height: 1.5;
-      margin: 1.5rem 0;
+      font-size: .95rem;
     }
 
-    .hl-keyword  { color: #ff79c6; }
-    .hl-function { color: #8be9fd; }
-    .hl-string   { color: #f1fa8c; }
-    .hl-number   { color: #bd93f9; }
-    .hl-builtin  { color: #50fa7b; }
-    .hl-comment  { color: #6272a4; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .note { margin-top: 10px; opacity: .75; }
 
     footer {
-      text-align: center;
-      padding: 3rem 1rem;
-      color: var(--fg-dim);
-      border-top: 1px solid var(--border);
-      font-size: 0.9rem;
-    }
-
-    @media (max-width: 600px) {
-      h1 { font-size: 2.4rem; }
-      main { padding: 2rem 1rem; }
+      margin-top: 56px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(127,127,127,.25);
+      opacity: .75;
+      font-size: .95rem;
     }
   </style>
 </head>
 <body>
 
-<header>
-  <div class="logo">Relay<span>.</span></div>
-  <button id="theme-toggle">Light</button>
-</header>
-
 <main>
-
   <h1>Relay</h1>
   <p class="tagline">
     Async by default — no await keyword<br>
@@ -159,88 +88,44 @@
   </p>
 
   <div class="buttons">
-    <a href="https://github.com/patx/relay-lang" class="btn primary">GitHub</a>
-    <a href="https://github.com/patx/relay-lang#quick-start" class="btn">Quick Start</a>
+    <a class="btn primary" href="https://github.com/patx/relay-lang">GitHub</a>
+    <a class="btn" href="https://github.com/patx/relay-lang#quick-start">Quick Start</a>
   </div>
 
   <section>
-    <h2>Simple Web Server</h2>
-    <pre><code><span class="hl-keyword">app</span> = WebApp()
-<span class="hl-keyword">server</span> = WebServer()
-
-<span class="hl-keyword">fn</span> <span class="hl-function">auth</span>()
-    <span class="hl-keyword">if</span> (request.path == <span class="hl-string">"/private"</span> && session[<span class="hl-string">"user"</span>] == <span class="hl-keyword">None</span>)
-        <span class="hl-keyword">return</span> app.redirect(<span class="hl-string">"/login"</span>)
-
-app.use(auth)
-app.static(<span class="hl-string">"/assets"</span>, <span class="hl-string">"./public"</span>)
-
-<span class="hl-keyword">@app.get</span>(<span class="hl-string">"/"</span>)
-<span class="hl-keyword">fn</span> <span class="hl-function">index</span>()
-    <span class="hl-keyword">return</span> <span class="hl-string">"Hello, {{ user }}"</span>
-
-<span class="hl-keyword">server.run</span>(app)</code></pre>
-  </section>
-
-  <section>
     <h2>Async without await</h2>
-    <pre><code><span class="hl-keyword">sleep</span>(<span class="hl-number">2000</span>, print(<span class="hl-string">"world"</span>))
-print(<span class="hl-string">"hello"</span>)</code></pre>
-    <p style="text-align:center; color:var(--fg-dim);">
-      → prints "hello" right away, "world" after 2 seconds
-    </p>
+    <pre><code>sleep(2000, print("world"))
+print("hello")</code></pre>
+    <p class="note">→ prints "hello" right away, "world" after 2 seconds</p>
   </section>
 
   <section>
-    <h2>Concurrent HTTP calls</h2>
-    <pre><code>http = Http()
+    <h2>Simple Web Server</h2>
+    <pre><code>app = WebApp()
+server = WebServer()
 
-<span class="hl-keyword">fn</span> <span class="hl-function">fetch_user</span>(user_id)
-    resp = http.get(<span class="hl-string">"https://api.example.com/users/"</span> + str(user_id))
-    <span class="hl-keyword">return</span> resp.json()
+@app.get("/")
+fn index()
+    return "hello world"
 
-tasks = []
-i = <span class="hl-number">1</span>
-<span class="hl-keyword">while</span> (i <= <span class="hl-number">5</span>)
-    tasks =+ [spawn(fetch_user(i))]
-    i =+ <span class="hl-number">1</span>
-
-users = <span class="hl-builtin">all</span>(tasks)
-<span class="hl-keyword">for</span> (user <span class="hl-keyword">in</span> users)
-    print(user[<span class="hl-string">"name"</span>])</code></pre>
+server.run(app)</code></pre>
   </section>
 
-  <section style="text-align:center; margin:6rem 0 4rem;">
+  <section>
     <h2>Get Started</h2>
-    <pre style="display:inline-block; text-align:left;"><code>git clone https://github.com/patx/relay-lang
-cd relay
+        <p class="note">→ Requires Rust</p>
+    <pre><code>git clone https://github.com/patx/relay-lang
+cd relay-lang
 cargo install --path .
 
-relay examples/hello.ry</code></pre>
+relay test.ry</code></pre>
   </section>
-
 </main>
 
 <footer>
-  <p>Relay • MIT license • v0.1 • Made with Rust</p>
+  Relay • MIT license • v0.1 • Made with Rust
 </footer>
-
-<script>
-  const toggle = document.getElementById('theme-toggle');
-  const html = document.documentElement;
-  let theme = localStorage.getItem('theme') || 
-    (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-
-  html.setAttribute('data-theme', theme);
-  toggle.textContent = theme === 'light' ? 'Dark' : 'Light';
-
-  toggle.onclick = () => {
-    theme = theme === 'dark' ? 'light' : 'dark';
-    html.setAttribute('data-theme', theme);
-    toggle.textContent = theme === 'light' ? 'Dark' : 'Light';
-    localStorage.setItem('theme', theme);
-  };
-</script>
 
 </body>
 </html>
+
