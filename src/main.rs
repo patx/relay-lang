@@ -77,11 +77,11 @@ enum Stmt {
         module: String,
     },
     Assign {
-        name: String,
+        target: Expr,
         expr: Expr,
     },
     AugAssign {
-        name: String,
+        target: Expr,
         op: AugOp,
         expr: Expr,
     },
@@ -728,33 +728,40 @@ impl Parser {
             return self.parse_destructure_assign();
         }
 
-        // assignment
-        if let Some(name) = self.peek_ident_string() {
-            if self.peek_n_is(1, &Tok::Assign)
-                || self.peek_n_is(1, &Tok::AugAdd)
-                || self.peek_n_is(1, &Tok::AugSub)
-            {
-                self.bump(); // ident
-                let op = self.bump().kind.clone();
-                let expr = self.parse_expr()?;
-                return Ok(match op {
-                    Tok::Assign => Stmt::Assign { name, expr },
-                    Tok::AugAdd => Stmt::AugAssign {
-                        name,
-                        op: AugOp::Add,
-                        expr,
-                    },
-                    Tok::AugSub => Stmt::AugAssign {
-                        name,
-                        op: AugOp::Sub,
-                        expr,
-                    },
-                    _ => unreachable!(),
-                });
+        let target = self.parse_expr()?;
+        if self.peek_is(&Tok::Assign) || self.peek_is(&Tok::AugAdd) || self.peek_is(&Tok::AugSub)
+        {
+            if !Self::is_assignment_target(&target) {
+                return Err(self.err_here("Invalid assignment target"));
             }
+            let op = self.bump().kind.clone();
+            let expr = self.parse_expr()?;
+            return Ok(match op {
+                Tok::Assign => Stmt::Assign { target, expr },
+                Tok::AugAdd => Stmt::AugAssign {
+                    target,
+                    op: AugOp::Add,
+                    expr,
+                },
+                Tok::AugSub => Stmt::AugAssign {
+                    target,
+                    op: AugOp::Sub,
+                    expr,
+                },
+                _ => unreachable!(),
+            });
         }
 
-        Ok(Stmt::Expr(self.parse_expr()?))
+        Ok(Stmt::Expr(target))
+    }
+
+    fn is_assignment_target(expr: &Expr) -> bool {
+        match expr {
+            Expr::Ident(_) => true,
+            Expr::Member { object, .. } => Self::is_assignment_target(object),
+            Expr::Index { target, .. } => Self::is_assignment_target(target),
+            _ => false,
+        }
     }
 
     fn parse_decorator(&mut self) -> RResult<Decorator> {
@@ -1696,30 +1703,22 @@ impl Evaluator {
                 self.import_module(module).await?;
                 Ok(Flow::None)
             }
-            Stmt::Assign { name, expr } => {
+            Stmt::Assign { target, expr } => {
                 let v = self.eval_expr(expr).await?;
-                let mut env = self.env.lock().await;
-                if !env.assign_existing(name, v.clone()) {
-                    env.set(name, v);
-                }
+                self.assign_to_expr(target, v).await?;
                 Ok(Flow::None)
             }
-            Stmt::AugAssign { name, op, expr } => {
+            Stmt::AugAssign { target, op, expr } => {
                 let rhs = self
                     .resolve_deferred_only(self.eval_expr(expr).await?)
                     .await?;
-                let env = self.env.lock().await;
-                let cur = env.get(name)?;
-                drop(env);
+                let cur = self.eval_expr(target).await?;
                 let cur = self.resolve_if_needed(cur).await?;
                 let out = match op {
                     AugOp::Add => bin_add(cur, rhs)?,
                     AugOp::Sub => bin_sub(cur, rhs)?,
                 };
-                let mut env = self.env.lock().await;
-                if !env.assign_existing(name, out.clone()) {
-                    env.set(name, out);
-                }
+                self.assign_to_expr(target, out).await?;
                 Ok(Flow::None)
             }
             Stmt::DestructureAssign { targets, expr } => {
@@ -1856,6 +1855,35 @@ impl Evaluator {
     }
 
     #[async_recursion]
+    async fn assign_to_expr(&self, target_expr: &Expr, value: Value) -> RResult<()> {
+        match target_expr {
+            Expr::Ident(name) => {
+                let mut env = self.env.lock().await;
+                if !env.assign_existing(name, value.clone()) {
+                    env.set(name, value);
+                }
+                Ok(())
+            }
+            Expr::Member { object, name } => {
+                let object_value = self
+                    .resolve_if_needed(self.eval_expr(object).await?)
+                    .await?;
+                let updated = assign_member_value(object_value, name, value)?;
+                self.assign_to_expr(object, updated).await
+            }
+            Expr::Index { target, index } => {
+                let container = self
+                    .resolve_if_needed(self.eval_expr(target).await?)
+                    .await?;
+                let idx = self.resolve_if_needed(self.eval_expr(index).await?).await?;
+                let updated = assign_index_value(container, idx, value)?;
+                self.assign_to_expr(target, updated).await
+            }
+            _ => Err(RelayError::Type("Invalid assignment target".into())),
+        }
+    }
+
+    #[async_recursion]
     async fn eval_expr(&self, e: &Expr) -> RResult<Value> {
         match e {
             Expr::Int(n) => Ok(Value::Int(*n)),
@@ -1956,14 +1984,10 @@ impl Evaluator {
                         .nth(i as usize)
                         .map(|c| Value::Str(c.to_string()))
                         .ok_or_else(|| RelayError::Runtime("Index out of range".into())),
-                    (Value::Dict(m), k) => m
-                        .get(&k.repr())
-                        .cloned()
-                        .ok_or_else(|| RelayError::Runtime("Key not found".into())),
-                    (Value::Json(j), Value::Str(k)) => Ok(match j.get(&k) {
-                        Some(v) => Value::Json(v.clone()),
-                        None => return Err(RelayError::Runtime("Key not found".into())),
-                    }),
+                    (Value::Dict(m), k) => Ok(m.get(&k.repr()).cloned().unwrap_or(Value::None)),
+                    (Value::Json(j), Value::Str(k)) => {
+                        Ok(j.get(&k).cloned().map(Value::Json).unwrap_or(Value::None))
+                    }
                     _ => Err(RelayError::Type(
                         "Indexing expects list/string/dict/json".into(),
                     )),
@@ -2307,6 +2331,54 @@ fn cmp_num(v: &Value) -> RResult<f64> {
         _ => Err(RelayError::Type("Comparison expects numbers".into())),
     }
 }
+
+fn assign_member_value(object: Value, name: &str, value: Value) -> RResult<Value> {
+    match object {
+        Value::Dict(mut map) => {
+            map.insert(name.to_string(), value);
+            Ok(Value::Dict(map))
+        }
+        Value::Json(mut j) => {
+            let obj = j.as_object_mut().ok_or_else(|| {
+                RelayError::Type("Member assignment on JSON expects object value".into())
+            })?;
+            obj.insert(name.to_string(), value_to_json(&value));
+            Ok(Value::Json(j))
+        }
+        _ => Err(RelayError::Type(
+            "Member assignment expects dict or JSON object".into(),
+        )),
+    }
+}
+
+fn assign_index_value(container: Value, index: Value, value: Value) -> RResult<Value> {
+    match (container, index) {
+        (Value::List(mut values), Value::Int(i)) => {
+            let idx = usize::try_from(i)
+                .map_err(|_| RelayError::Runtime("Index out of range".into()))?;
+            let slot = values
+                .get_mut(idx)
+                .ok_or_else(|| RelayError::Runtime("Index out of range".into()))?;
+            *slot = value;
+            Ok(Value::List(values))
+        }
+        (Value::Dict(mut map), key) => {
+            map.insert(key.repr(), value);
+            Ok(Value::Dict(map))
+        }
+        (Value::Json(mut j), Value::Str(key)) => {
+            let obj = j.as_object_mut().ok_or_else(|| {
+                RelayError::Type("JSON indexing expects object value".into())
+            })?;
+            obj.insert(key, value_to_json(&value));
+            Ok(Value::Json(j))
+        }
+        _ => Err(RelayError::Type(
+            "Indexed assignment expects list/dict/json".into(),
+        )),
+    }
+}
+
 fn bin_add(l: Value, r: Value) -> RResult<Value> {
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
@@ -4396,5 +4468,51 @@ mod tests {
             err,
             RelayError::Syntax { msg, .. } if msg.contains("without matching if")
         ));
+    }
+
+    #[tokio::test]
+    async fn supports_index_assignment_and_missing_dict_keys() {
+        let src = r#"numbers = [1, 2, 3]
+numbers[0] = 10
+session = {}
+session["user"] = "alice"
+is_missing_none = (session["missing"] == None)
+"#;
+
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let env_lock = env.lock().await;
+
+        let numbers = env_lock.get("numbers").expect("numbers should exist");
+        match numbers {
+            Value::List(values) => {
+                assert!(matches!(values.first(), Some(Value::Int(10))));
+            }
+            _ => panic!("numbers should be a list"),
+        }
+
+        let session = env_lock.get("session").expect("session should exist");
+        match session {
+            Value::Dict(map) => {
+                assert!(matches!(map.get("user"), Some(Value::Str(s)) if s == "alice"));
+            }
+            _ => panic!("session should be a dict"),
+        }
+
+        let missing = env_lock
+            .get("is_missing_none")
+            .expect("is_missing_none should exist");
+        assert!(matches!(missing, Value::Bool(true)));
     }
 }

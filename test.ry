@@ -1,2 +1,19 @@
-content = read_file("test.ry")
-print(content)
+app = WebApp()
+server = WebServer()
+
+@app.get("/login")
+fn login(user: str = "guest")
+    session["user"] = user
+    return app.redirect("/u/" + user)
+
+fn auth()
+    if (request.path == "/u/<user>" && session["user"] == None)
+        return app.redirect("/login")
+
+app.use(auth)
+
+@app.get("/u/<user>")
+fn index(user: str)
+    return "Hello, {{ user }}"
+
+server.run(app)
