@@ -40,11 +40,16 @@ Relay is designed for building high-performance web services, APIs, and network 
 - **Implicit Async**: No `await` keyword needed—async operations resolve automatically when values are accessed
 - **Python-like Syntax**: Clean, indentation-based syntax that's easy to read and write
 - **Built-in Web Server**: Flask/FastAPI-style decorators with automatic routing
+- **Route Groups + OpenAPI**: Prefix route groups and expose generated `/openapi.json`
 - **Static File Serving**: Mount directories directly in your web app (`app.static("/assets", "./public")`)
 - **Middleware Hooks**: Run request middleware before handlers (`app.use(auth_middleware)`)
-- **HTTP Client**: Simple, async HTTP requests built-in
+- **HTTP Client**: Async HTTP client with `get/post/put/patch/delete` and request/response headers
 - **MongoDB Integration**: Native async MongoDB support
 - **Session Management**: Built-in session handling with HttpOnly cookies
+- **Pluggable Session Backends**: Use in-memory sessions or custom load/save callbacks
+- **Authentication Helpers**: Password hashing/verification and pluggable auth stores
+- **Structured API Errors**: `HTTPError(...)` helper with consistent JSON error envelope
+- **Request IDs**: Per-request `request_id` in handler context and `x-request-id` response header
 - **Template Rendering**: MiniJinja-powered templates available in any string expression (`{{ variable }}`)
 - **Type Hints**: Optional runtime type checking for function parameters
 - **List Comprehensions**: Python-style inline list transforms with optional filtering
@@ -372,10 +377,13 @@ result = add(5, 10)         // OK
 result = add("5", "10")     // Type error!
 ```
 
+Type hints on regular functions are strict validation (no implicit coercion). Unknown type hints raise a runtime type error.
+
 **Supported Types:**
 - `str`: String
 - `int`: Integer
 - `float`: Float
+- `bool`: Boolean
 - `json` or `Json`: JSON object
 
 ```relay
@@ -654,27 +662,37 @@ Create an HTTP client instance.
 http = Http()
 ```
 
-#### `http.get(url)`
+#### `http.get(url, headers=None)`
 **Returns:** `Deferred<Response>`
 
 Send a GET request.
 
 ```relay
 http = Http()
-resp = http.get("https://api.example.com/users")
+resp = http.get(
+    "https://api.example.com/users",
+    headers={"authorization": "Bearer token"}
+)
 print(resp.status)  // 200
 print(resp.text)    // Response body as string
 ```
 
-#### `http.post(url, data=None)`
+#### `http.post(url, data=None, headers=None)`
+#### `http.put(url, data=None, headers=None)`
+#### `http.patch(url, data=None, headers=None)`
+#### `http.delete(url, data=None, headers=None)`
 **Returns:** `Deferred<Response>`
 
-Send a POST request with JSON body.
+Send requests with optional payloads and headers.
 
 ```relay
 http = Http()
 payload = {"name": "Ada", "email": "ada@example.com"}
-resp = http.post("https://api.example.com/users", payload)
+resp = http.post(
+    "https://api.example.com/users",
+    payload,
+    headers={"content-type": "application/json"}
+)
 ```
 
 #### Response Object
@@ -684,6 +702,7 @@ HTTP responses have the following properties:
 - `resp.status` - HTTP status code (int)
 - `resp.text` - Response body as string
 - `resp.json()` - Parse response body as JSON
+- `resp.headers` - Response headers (dict)
 
 ```relay
 http = Http()
@@ -724,6 +743,43 @@ fn index()
 @app.post("/users")
 fn create_user(name: str, email: str)
     return {"id": 123, "name": name, "email": email}
+```
+
+Decorator schema options:
+- `validate=...` - Validate/coerce body payload (JSON first, then form)
+- `query=...` - Validate/coerce query parameters
+- `body=...` - Validate/coerce form body
+- `json=...` - Validate/coerce JSON body
+
+```relay
+@app.get("/search", query={"limit": "int", "q?": "str"})
+fn search(limit, q = None)
+    return {"limit": limit, "q": q}
+
+@app.post("/users", json={"name": "str", "age?": "int"})
+fn create_user(name, age = None)
+    return {"name": name, "age": age}
+```
+
+#### Route Groups and OpenAPI
+
+Use grouped route prefixes to organize larger APIs:
+
+```relay
+app = WebApp()
+api = app.group("/api")
+v1 = api.group("/v1")
+
+@v1.get("/users/<user_id>")
+fn get_user(user_id)
+    return {"id": user_id}
+```
+
+Enable generated OpenAPI docs:
+
+```relay
+app.openapi(title="Relay API", version="1.0.0")
+// Exposes GET /openapi.json
 ```
 
 #### WebSocket Routes
@@ -791,6 +847,29 @@ fn create_event(data: Json)
     return {"event_type": data["type"], "user": data["user"]}
 ```
 
+For zero-arg handlers (or explicit access), use request helpers: `get_query()`, `get_body()`, and `get_json()`.
+
+#### Middleware
+
+Register middleware with `app.use(fn)`.
+
+Middleware functions can be:
+- `fn middleware()` (legacy style)
+- `fn middleware(ctx)` where `ctx` contains request fields
+- `fn middleware(ctx, next)` with full chain semantics
+
+If middleware returns a non-`None` value, Relay short-circuits and sends that response.
+
+`next()` runs the remainder of the middleware chain and then the handler.
+
+```relay
+fn audit(ctx, next)
+    print("before:", ctx["path"])
+    result = next()
+    print("after:", ctx["path"])
+    return result
+```
+
 #### Type Hints in Handlers
 
 Use type hints to enforce parameter types and enable automatic coercion:
@@ -808,6 +887,7 @@ fn calculate(a: int, b: int)
 - `str` - String
 - `int` - Integer
 - `float` - Float
+- `bool` - Boolean
 - `json` or `Json` - Full JSON body (for POST/PUT/PATCH)
 
 #### Request Object
@@ -819,6 +899,7 @@ Every handler has access to a `request` dictionary:
 fn debug_request()
     print(request["method"])    // GET
     print(request["path"])      // /debug
+    print(request["request_id"])// rid_...
     print(request["query"])     // Query parameters dict
     print(request["form"])      // Form fields dict (if present)
     print(request["json"])      // JSON body (if present)
@@ -830,11 +911,54 @@ fn debug_request()
 **Request fields:**
 - `method` - HTTP method (string)
 - `path` - Request path (string)
+- `request_id` - Request identifier string
 - `query` - Query parameters (dict)
 - `form` - Parsed form body fields (dict, when present)
 - `headers` - Request headers (dict)
 - `cookies` - Cookies (dict)
 - `json` - Parsed JSON body (if present)
+
+#### Request Helpers
+
+Use helpers when you want payload access without binding handler parameters:
+
+- `get_query()` - Query parameters as a dict (empty dict when unavailable)
+- `get_body()` - Parsed form fields as a dict (empty dict when unavailable)
+- `get_json()` - Parsed JSON body (or `None` when unavailable)
+
+```relay
+@app.get("/search")
+fn search()
+    query = get_query()
+    return {"q": query["q"]}
+
+@app.post("/submit")
+fn submit()
+    form = get_body()
+    payload = get_json()
+    return {"form": form, "json": payload}
+```
+
+#### Validation Helpers
+
+Use schema helpers for explicit request validation:
+
+- `validate(data, schema)` - Validate/coerce an object against schema
+- `require_query(schema)` - Validate query params in handlers
+- `require_body(schema)` - Validate form body in handlers
+- `require_json(schema)` - Validate JSON body in handlers
+
+Schema format:
+- `"field": "type"` for required fields
+- `"field?": "type"` for optional fields
+- `"field": {"type": "int", "required": True, "default": 10}` for explicit rules
+
+```relay
+@app.get("/search")
+fn search()
+    params = require_query({"limit": "int", "q?": "str"})
+    return {"limit": params["limit"], "q": params["q"]}
+```
 
 #### Cookies
 
@@ -869,8 +993,28 @@ fn profile()
 **Session features:**
 - Automatically persisted across requests
 - Stored server-side (not in cookies)
-- Uses HttpOnly `relay_sid` cookie
+- Uses `relay_sid` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` automatically on HTTPS)
 - Session data is a dictionary that persists modifications
+
+Customize cookie policy:
+
+```relay
+app.session(secure=True, http_only=True, same_site="Lax")
+```
+
+Use a custom session backend (for any database/service):
+
+```relay
+session_db = {}
+
+fn load_session(sid)
+    return session_db[sid]
+
+fn save_session(sid, data)
+    session_db[sid] = data
+
+app.session_backend(load_session, save_session)
+```
 
 #### Response Types
 
@@ -929,6 +1073,60 @@ fn get_xml()
 - `body` - Response body (string, dict, list, or bytes)
 - `status` - HTTP status code (default: 200)
 - `content_type` - Content-Type header (auto-detected if not specified)
+
+#### `HTTPError(status, code, message, details=None)`
+Create a structured API error response.
+When called inside a handler, Relay also includes `request_id` in the error payload.
+
+```relay
+@app.post("/users")
+fn create_user(name)
+    if (name == None)
+        return HTTPError(400, "validation_error", "Missing name", {"field": "name"})
+    return {"ok": True}
+```
+
+#### Authentication Helpers
+
+#### `auth_hash_password(password)`
+**Returns:** password hash string
+
+#### `auth_verify_password(password, hash)`
+**Returns:** `bool`
+
+```relay
+hash = auth_hash_password("super-secret")
+is_valid = auth_verify_password("super-secret", hash)   // True
+```
+
+#### `AuthStore(load_fn=None, save_fn=None)`
+Create an authentication store.
+
+- `AuthStore()` uses in-memory storage.
+- `AuthStore(load_fn, save_fn)` uses custom callbacks for pluggable backends.
+
+Available methods:
+- `store.register(username, password)` - hashes and stores password
+- `store.verify(username, password)` - verifies against stored hash
+- `store.get_hash(username)` - returns stored hash or `None`
+- `store.set_hash(username, hash)` - stores precomputed hash
+
+```relay
+store = AuthStore()
+store.register("ada", "pw")
+print(store.verify("ada", "pw"))  // True
+
+auth_db = {}
+fn load_user(name)
+    return auth_db[name]
+
+fn save_user(name, hash)
+    auth_db[name] = hash
+
+custom = AuthStore(load_user, save_user)
+custom.register("bob", "pw2")
+print(custom.verify("bob", "pw2"))  // True
+```
 
 #### `app.redirect(url)`
 **Returns:** `Response` with 302 status
@@ -1538,10 +1736,12 @@ The web server uses Axum's routing system:
 ### Session Storage
 
 Sessions are stored server-side in an in-memory hash map:
-- Session ID is generated using UUID
-- `relay_sid` cookie stores the session ID (HttpOnly, SameSite=Lax)
+- Session ID is generated by Relay at runtime
+- `relay_sid` cookie stores the session ID (`HttpOnly`, `SameSite=Lax`, `Secure` on HTTPS)
 - Session data persists across requests for the same session ID
 - Sessions are stored in memory (cleared on server restart)
+
+Every web request is also assigned a `request_id` and echoed as the `x-request-id` response header.
 
 **Note:** In production, you'd want to persist sessions to a database.
 
@@ -1904,7 +2104,7 @@ Found a bug? [Open an issue](https://github.com/patx/relay-lang/issues) with:
 
 **Known Gaps (Identified in v0.1):**
 - [ ] JSON request key binding to scalar handler args (e.g. bind `{"name":"Ada"}` directly to `fn create(name)`).
-- [ ] HTTP client parity for `put`, `patch`, `delete`, request headers, and response header access.
+- [x] HTTP client parity for `put`, `patch`, `delete`, request headers, and response header access.
 - [ ] First-class CLI flags (`--help`, `--version`) for better install verification and discoverability.
 - [ ] Built-in HTML escaping helper for safely rendering user content directly in server-side templates.
 

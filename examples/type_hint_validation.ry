@@ -1,0 +1,23 @@
+print("== Untyped Function (no validation) ==")
+
+// No type hints: accepts any value types.
+fn pair(a, b)
+    return [a, b]
+
+print(pair(1, "two"))
+print(pair({"name": "Ada"}, [10, 20]))
+
+print("== Typed Function (runtime validation) ==")
+
+// Type hints: arguments must match declared types.
+fn add_ints(a: int, b: int)
+    return a + b
+
+print(add_ints(5, 7))
+
+try
+    // Avoid wrapping in print(...) first; print is async and can hide this error.
+    bad = add_ints("5", "7")
+    print("Unexpected success: " + str(bad))
+except(err)
+    print("Type validation error: " + str(err))

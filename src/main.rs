@@ -31,6 +31,10 @@ use axum::{
 };
 
 use async_recursion::async_recursion;
+use argon2::{
+    password_hash::{SaltString, rand_core::OsRng},
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+};
 use futures::{stream::TryStreamExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
 use minijinja::Environment;
@@ -140,6 +144,10 @@ enum Decorator {
         base: String, // variable name holding Route handle
         method: String,
         path: String,
+        validate_schema: Option<Expr>,
+        query_schema: Option<Expr>,
+        body_schema: Option<Expr>,
+        json_schema: Option<Expr>,
     },
 }
 
@@ -775,8 +783,49 @@ impl Parser {
             Tok::Str(s) => s,
             _ => return Err(self.err_here("Decorator expects string path")),
         };
+        let mut validate_schema = None;
+        let mut query_schema = None;
+        let mut body_schema = None;
+        let mut json_schema = None;
+
+        if self.peek_is(&Tok::Comma) {
+            self.bump();
+            while !self.peek_is(&Tok::RParen) {
+                let key = self.expect_ident()?;
+                self.expect(&Tok::Assign)?;
+                let value = self.parse_expr()?;
+                match key.as_str() {
+                    "validate" => validate_schema = Some(value),
+                    "query" => query_schema = Some(value),
+                    "body" | "form" => body_schema = Some(value),
+                    "json" => json_schema = Some(value),
+                    _ => {
+                        return Err(self.err_here(
+                            "Decorator option must be one of: validate, query, body, json",
+                        ))
+                    }
+                }
+
+                if self.peek_is(&Tok::Comma) {
+                    self.bump();
+                    if self.peek_is(&Tok::RParen) {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+        }
         self.expect(&Tok::RParen)?;
-        Ok(Decorator::Route { base, method, path })
+        Ok(Decorator::Route {
+            base,
+            method,
+            path,
+            validate_schema,
+            query_schema,
+            body_schema,
+            json_schema,
+        })
     }
 
     fn parse_func_def(&mut self, decorators: Vec<Decorator>) -> RResult<Stmt> {
@@ -1324,6 +1373,7 @@ enum Object {
     WebServer(WebServerHandle),
     Http(HttpHandle),
     HttpResponse(HttpResponseHandle),
+    AuthStore(AuthStoreHandle),
     MongoClient(MongoClientHandle),
     MongoDatabase(MongoDatabaseHandle),
     MongoCollection(MongoCollectionHandle),
@@ -1530,6 +1580,7 @@ fn render_template(s: &str, locals: &HashMap<String, Value>) -> RResult<String> 
 
 // ========================= Evaluator (async, implicit Deferred) =========================
 
+#[derive(Clone)]
 struct Evaluator {
     env: Arc<tokio::sync::Mutex<Env>>,
     module_state: Arc<tokio::sync::Mutex<ModuleState>>,
@@ -2154,11 +2205,11 @@ impl Evaluator {
             }
         }
 
-        // type hints: enforce minimal (str/int/float/Json)
+        // type hints: strict runtime validation (no implicit coercion)
         for p in &f.params {
             if let Some(ty) = &p.ty {
                 if let Some(v) = bound.get(&p.name).cloned() {
-                    bound.insert(p.name.clone(), coerce_param_type(ty, v)?);
+                    bound.insert(p.name.clone(), validate_param_type(ty, v)?);
                 }
             }
         }
@@ -2180,6 +2231,121 @@ impl Evaluator {
         }
 
         Ok(result)
+    }
+
+    async fn call_named_function(&self, name: &str, args: Vec<Value>) -> RResult<Value> {
+        let callee = { self.env.lock().await.get(name)? };
+        let out = self.call_value(callee, args, vec![]).await?;
+        self.resolve_if_needed(out).await
+    }
+
+    async fn load_session_data(
+        &self,
+        app: &WebAppHandle,
+        session_id: &Option<String>,
+    ) -> RResult<IndexMap<String, Value>> {
+        let Some(sid) = session_id.clone() else {
+            return Ok(IndexMap::new());
+        };
+
+        match app.session_backend() {
+            SessionBackendConfig::Memory => Ok(app.get_session(&sid)),
+            SessionBackendConfig::Callback { load_fn, .. } => {
+                let out = self
+                    .call_named_function(&load_fn, vec![Value::Str(sid)])
+                    .await?;
+                match out {
+                    Value::None => Ok(IndexMap::new()),
+                    Value::Dict(m) => Ok(m),
+                    Value::Json(J::Object(obj)) => Ok(obj
+                        .iter()
+                        .map(|(k, v)| (k.clone(), json_to_value(v)))
+                        .collect()),
+                    other => Err(RelayError::Type(format!(
+                        "session load callback must return dict/json/None, got {}",
+                        value_type_name(&other)
+                    ))),
+                }
+            }
+        }
+    }
+
+    async fn persist_session_data(
+        &self,
+        app: &WebAppHandle,
+        session_id: String,
+        data: IndexMap<String, Value>,
+    ) -> RResult<()> {
+        match app.session_backend() {
+            SessionBackendConfig::Memory => {
+                app.put_session(session_id, data);
+                Ok(())
+            }
+            SessionBackendConfig::Callback { save_fn, .. } => {
+                let _ = self
+                    .call_named_function(&save_fn, vec![Value::Str(session_id), Value::Dict(data)])
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    #[async_recursion]
+    async fn run_middleware_chain(
+        self: Arc<Self>,
+        middlewares: Arc<Vec<Arc<UserFunction>>>,
+        index: usize,
+        ctx: Value,
+        handler: Arc<dyn Fn() -> BoxFut + Send + Sync>,
+    ) -> RResult<Value> {
+        if index >= middlewares.len() {
+            return (handler)().await;
+        }
+
+        let mw = middlewares[index].clone();
+        let mut args = Vec::new();
+        if !mw.params.is_empty() {
+            args.push(ctx.clone());
+        }
+
+        let next_result = Arc::new(tokio::sync::Mutex::new(None::<Value>));
+        if mw.params.len() >= 2 {
+            let evaluator = self.clone();
+            let middlewares = middlewares.clone();
+            let handler = handler.clone();
+            let ctx_for_next = ctx.clone();
+            let next_result_cell = next_result.clone();
+            args.push(Value::Builtin(Arc::new(move |_args, _kwargs| {
+                let evaluator = evaluator.clone();
+                let middlewares = middlewares.clone();
+                let handler = handler.clone();
+                let ctx_for_next = ctx_for_next.clone();
+                let next_result_cell = next_result_cell.clone();
+                Box::pin(async move {
+                    let out = evaluator
+                        .run_middleware_chain(middlewares, index + 1, ctx_for_next, handler)
+                        .await?;
+                    {
+                        let mut cell = next_result_cell.lock().await;
+                        *cell = Some(out.clone());
+                    }
+                    Ok(out)
+                })
+            })));
+        }
+
+        let result = self.call_user_fn(&mw, args, vec![]).await?;
+        if !matches!(result, Value::None) {
+            return Ok(result);
+        }
+
+        if mw.params.len() >= 2 {
+            let from_next = next_result.lock().await.clone();
+            return Ok(from_next.unwrap_or(Value::None));
+        }
+
+        self.run_middleware_chain(middlewares, index + 1, ctx, handler)
+            .await
     }
 
     async fn get_member(&self, obj: Value, name: &str) -> RResult<Value> {
@@ -2240,17 +2406,53 @@ impl Evaluator {
     ) -> RResult<()> {
         for d in decorators {
             match d {
-                Decorator::Route { base, method, path } => {
+                Decorator::Route {
+                    base,
+                    method,
+                    path,
+                    validate_schema,
+                    query_schema,
+                    body_schema,
+                    json_schema,
+                } => {
+                    let mut validation = RouteValidation::default();
+                    if let Some(expr) = validate_schema {
+                        validation.validate_schema =
+                            Some(self.resolve_if_needed(self.eval_expr(expr).await?).await?);
+                    }
+                    if let Some(expr) = query_schema {
+                        validation.query_schema =
+                            Some(self.resolve_if_needed(self.eval_expr(expr).await?).await?);
+                    }
+                    if let Some(expr) = body_schema {
+                        validation.body_schema =
+                            Some(self.resolve_if_needed(self.eval_expr(expr).await?).await?);
+                    }
+                    if let Some(expr) = json_schema {
+                        validation.json_schema =
+                            Some(self.resolve_if_needed(self.eval_expr(expr).await?).await?);
+                    }
+
                     let base_val = self.env.lock().await.get(base)?;
                     let base_val = self.resolve_if_needed(base_val).await?;
                     match base_val {
                         // New spec: @app.get("/path") where `app` is a WebApp
                         Value::Obj(Object::WebApp(a)) => {
-                            a.register(method.clone(), path.clone(), fn_name.to_string());
+                            a.register(
+                                method.clone(),
+                                path.clone(),
+                                fn_name.to_string(),
+                                validation.clone(),
+                            );
                         }
                         // Back-compat: route = app.route(); @route.get("/path")
                         Value::Obj(Object::Route(r)) => {
-                            r.register(method.clone(), path.clone(), fn_name.to_string());
+                            r.register(
+                                method.clone(),
+                                path.clone(),
+                                fn_name.to_string(),
+                                validation.clone(),
+                            );
                         }
                         _ => {
                             return Err(RelayError::Type(format!(
@@ -2262,6 +2464,75 @@ impl Evaluator {
             }
         }
         Ok(())
+    }
+}
+
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::Bool(_) => "bool",
+        Value::Str(_) => "str",
+        Value::None => "None",
+        Value::List(_) => "list",
+        Value::Dict(_) => "dict",
+        Value::Json(_) => "Json",
+        Value::Bytes(_) => "bytes",
+        Value::Function(_) => "function",
+        Value::Builtin(_) => "builtin",
+        Value::Deferred(_) => "Deferred",
+        Value::Task(_) => "Task",
+        Value::Thunk(_) => "Thunk",
+        Value::Obj(_) => "object",
+        Value::Response(_) => "Response",
+    }
+}
+
+fn validate_param_type(ty: &str, v: Value) -> RResult<Value> {
+    match ty {
+        "str" => match v {
+            Value::Str(s) => Ok(Value::Str(s)),
+            other => Err(RelayError::Type(format!(
+                "Expected str, got {}",
+                value_type_name(&other)
+            ))),
+        },
+        "int" => match v {
+            Value::Int(n) => Ok(Value::Int(n)),
+            other => Err(RelayError::Type(format!(
+                "Expected int, got {}",
+                value_type_name(&other)
+            ))),
+        },
+        "float" => match v {
+            Value::Float(f) => Ok(Value::Float(f)),
+            other => Err(RelayError::Type(format!(
+                "Expected float, got {}",
+                value_type_name(&other)
+            ))),
+        },
+        "bool" => match v {
+            Value::Bool(b) => Ok(Value::Bool(b)),
+            other => Err(RelayError::Type(format!(
+                "Expected bool, got {}",
+                value_type_name(&other)
+            ))),
+        },
+        "Json" | "json" => match v {
+            Value::Json(j) => Ok(Value::Json(j)),
+            Value::Dict(m) => {
+                let mut obj = serde_json::Map::new();
+                for (k, vv) in m {
+                    obj.insert(k, value_to_json(&vv));
+                }
+                Ok(Value::Json(J::Object(obj)))
+            }
+            other => Err(RelayError::Type(format!(
+                "Expected Json, got {}",
+                value_type_name(&other)
+            ))),
+        },
+        _ => Err(RelayError::Type(format!("Unknown type hint: {ty}"))),
     }
 }
 
@@ -2288,6 +2559,16 @@ fn coerce_param_type(ty: &str, v: Value) -> RResult<Value> {
                 .map_err(|_| RelayError::Type("Bad float".into())),
             _ => Err(RelayError::Type("Bad float".into())),
         },
+        "bool" => match v {
+            Value::Bool(b) => Ok(Value::Bool(b)),
+            Value::Int(n) => Ok(Value::Bool(n != 0)),
+            Value::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Ok(Value::Bool(true)),
+                "false" | "0" | "no" | "off" => Ok(Value::Bool(false)),
+                _ => Err(RelayError::Type("Bad bool".into())),
+            },
+            _ => Err(RelayError::Type("Bad bool".into())),
+        },
         "Json" | "json" => match v {
             Value::Json(j) => Ok(Value::Json(j)),
             Value::Dict(m) => {
@@ -2302,7 +2583,7 @@ fn coerce_param_type(ty: &str, v: Value) -> RResult<Value> {
                 .map_err(|_| RelayError::Type("Bad Json".into())),
             _ => Err(RelayError::Type("Bad Json".into())),
         },
-        _ => Ok(v),
+        _ => Err(RelayError::Type(format!("Unknown type hint: {ty}"))),
     }
 }
 
@@ -2535,6 +2816,128 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
                     }
                     _ => Ok(Value::Dict(IndexMap::new())),
                 }
+            })
+        })),
+    );
+
+    let evaluator_for_get_query = evaluator.clone();
+    env.set(
+        "get_query",
+        Value::Builtin(Arc::new(move |_args, _| {
+            let evaluator = evaluator_for_get_query.clone();
+            Box::pin(async move {
+                let request = {
+                    let env = evaluator.env.lock().await;
+                    env.get("request").ok()
+                };
+
+                match request {
+                    Some(Value::Dict(req)) => {
+                        Ok(req
+                            .get("query")
+                            .cloned()
+                            .unwrap_or(Value::Dict(IndexMap::new())))
+                    }
+                    _ => Ok(Value::Dict(IndexMap::new())),
+                }
+            })
+        })),
+    );
+
+    env.set(
+        "validate",
+        Value::Builtin(Arc::new(|args, _| {
+            Box::pin(async move {
+                let data = args.get(0).cloned().ok_or_else(|| {
+                    RelayError::Type("validate(data, schema) missing data".into())
+                })?;
+                let schema = args.get(1).cloned().ok_or_else(|| {
+                    RelayError::Type("validate(data, schema) missing schema".into())
+                })?;
+                validate_data_with_schema(data, schema, "validate(data, schema)")
+            })
+        })),
+    );
+
+    let evaluator_for_require_query = evaluator.clone();
+    env.set(
+        "require_query",
+        Value::Builtin(Arc::new(move |args, _| {
+            let evaluator = evaluator_for_require_query.clone();
+            Box::pin(async move {
+                let schema = args.get(0).cloned().ok_or_else(|| {
+                    RelayError::Type("require_query(schema) missing schema".into())
+                })?;
+                let request = {
+                    let env = evaluator.env.lock().await;
+                    env.get("request").ok()
+                };
+                let data = match request {
+                    Some(Value::Dict(req)) => req
+                        .get("query")
+                        .cloned()
+                        .unwrap_or(Value::Dict(IndexMap::new())),
+                    _ => Value::Dict(IndexMap::new()),
+                };
+                validate_data_with_schema(data, schema, "require_query(schema)")
+            })
+        })),
+    );
+
+    let evaluator_for_require_body = evaluator.clone();
+    env.set(
+        "require_body",
+        Value::Builtin(Arc::new(move |args, _| {
+            let evaluator = evaluator_for_require_body.clone();
+            Box::pin(async move {
+                let schema = args.get(0).cloned().ok_or_else(|| {
+                    RelayError::Type("require_body(schema) missing schema".into())
+                })?;
+                let request = {
+                    let env = evaluator.env.lock().await;
+                    env.get("request").ok()
+                };
+                let data = match request {
+                    Some(Value::Dict(req)) => req
+                        .get("form")
+                        .cloned()
+                        .unwrap_or(Value::Dict(IndexMap::new())),
+                    _ => Value::Dict(IndexMap::new()),
+                };
+                validate_data_with_schema(data, schema, "require_body(schema)")
+            })
+        })),
+    );
+
+    let evaluator_for_require_json = evaluator.clone();
+    env.set(
+        "require_json",
+        Value::Builtin(Arc::new(move |args, _| {
+            let evaluator = evaluator_for_require_json.clone();
+            Box::pin(async move {
+                let schema = args.get(0).cloned().ok_or_else(|| {
+                    RelayError::Type("require_json(schema) missing schema".into())
+                })?;
+                let request = {
+                    let env = evaluator.env.lock().await;
+                    env.get("request").ok()
+                };
+                let data = match request {
+                    Some(Value::Dict(req)) => match req.get("json").cloned() {
+                        Some(v) => v,
+                        None => {
+                            return Err(RelayError::Type(
+                                "require_json(schema) missing JSON body".into(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(RelayError::Type(
+                            "require_json(schema) can only be used in a web handler".into(),
+                        ))
+                    }
+                };
+                validate_data_with_schema(data, schema, "require_json(schema)")
             })
         })),
     );
@@ -2833,6 +3236,71 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
         })),
     );
 
+    let evaluator_for_http_error = evaluator.clone();
+    env.set(
+        "HTTPError",
+        Value::Builtin(Arc::new(move |args, kwargs| {
+            let evaluator = evaluator_for_http_error.clone();
+            Box::pin(async move {
+                let status = kwargs
+                    .iter()
+                    .find(|(k, _)| k == "status")
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| args.get(0).cloned())
+                    .unwrap_or(Value::Int(500));
+                let code = kwargs
+                    .iter()
+                    .find(|(k, _)| k == "code")
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| args.get(1).cloned())
+                    .unwrap_or(Value::Str("internal_error".into()));
+                let message = kwargs
+                    .iter()
+                    .find(|(k, _)| k == "message")
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| args.get(2).cloned())
+                    .unwrap_or(Value::Str("Internal server error".into()));
+                let details = kwargs
+                    .iter()
+                    .find(|(k, _)| k == "details")
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| args.get(3).cloned())
+                    .unwrap_or(Value::None);
+
+                let status = match status {
+                    Value::Int(n) => n as u16,
+                    Value::Float(f) => f as u16,
+                    Value::Str(s) => s.parse::<u16>().unwrap_or(500),
+                    _ => 500,
+                };
+
+                let details = match details {
+                    Value::None => None,
+                    other => Some(value_to_json(&other)),
+                };
+
+                let request_id = {
+                    let env = evaluator.env.lock().await;
+                    match env.get("request").ok() {
+                        Some(Value::Dict(req)) => match req.get("request_id") {
+                            Some(Value::Str(s)) => Some(s.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                };
+
+                Ok(Value::Response(error_response(
+                    status,
+                    &code.repr(),
+                    &message.repr(),
+                    details,
+                    request_id,
+                )))
+            })
+        })),
+    );
+
     // Web framework
     env.set(
         "WebServer",
@@ -2852,6 +3320,75 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
         "Http",
         Value::Builtin(Arc::new(|_args, _| {
             Box::pin(async move { Ok(Value::Obj(Object::Http(HttpHandle::new()))) })
+        })),
+    );
+
+    env.set(
+        "auth_hash_password",
+        Value::Builtin(Arc::new(|args, _| {
+            Box::pin(async move {
+                let password = expect_str(&args, 0, "auth_hash_password(password)")?;
+                let salt = SaltString::generate(&mut OsRng);
+                let hash = Argon2::default()
+                    .hash_password(password.as_bytes(), &salt)
+                    .map_err(|e| RelayError::Runtime(e.to_string()))?
+                    .to_string();
+                Ok(Value::Str(hash))
+            })
+        })),
+    );
+
+    env.set(
+        "auth_verify_password",
+        Value::Builtin(Arc::new(|args, _| {
+            Box::pin(async move {
+                let password = expect_str(&args, 0, "auth_verify_password(password, hash)")?;
+                let hash = expect_str(&args, 1, "auth_verify_password(password, hash)")?;
+                let parsed = match PasswordHash::new(&hash) {
+                    Ok(h) => h,
+                    Err(_) => return Ok(Value::Bool(false)),
+                };
+                Ok(Value::Bool(
+                    Argon2::default()
+                        .verify_password(password.as_bytes(), &parsed)
+                        .is_ok(),
+                ))
+            })
+        })),
+    );
+
+    let evaluator_for_auth_store = evaluator.clone();
+    env.set(
+        "AuthStore",
+        Value::Builtin(Arc::new(move |args, _| {
+            let evaluator = evaluator_for_auth_store.clone();
+            Box::pin(async move {
+                if args.is_empty() {
+                    return Ok(Value::Obj(Object::AuthStore(AuthStoreHandle::memory())));
+                }
+
+                let load_fn = match args.get(0).cloned() {
+                    Some(Value::Function(f)) => f.name.clone(),
+                    _ => {
+                        return Err(RelayError::Type(
+                            "AuthStore(load_fn, save_fn) expects load_fn function".into(),
+                        ))
+                    }
+                };
+                let save_fn = match args.get(1).cloned() {
+                    Some(Value::Function(f)) => f.name.clone(),
+                    _ => {
+                        return Err(RelayError::Type(
+                            "AuthStore(load_fn, save_fn) expects save_fn function".into(),
+                        ))
+                    }
+                };
+                Ok(Value::Obj(Object::AuthStore(AuthStoreHandle::callback(
+                    evaluator,
+                    load_fn,
+                    save_fn,
+                ))))
+            })
         })),
     );
 
@@ -2901,6 +3438,96 @@ fn expect_int(args: &[Value], i: usize, sig: &str) -> RResult<i64> {
             .map_err(|_| RelayError::Type(format!("{sig} expects int"))),
         _ => Err(RelayError::Type(format!("{sig} expects int"))),
     }
+}
+
+fn expect_object_like(v: Value, sig: &str) -> RResult<IndexMap<String, Value>> {
+    match v {
+        Value::Dict(m) => Ok(m),
+        Value::Json(J::Object(obj)) => Ok(obj
+            .iter()
+            .map(|(k, vv)| (k.clone(), json_to_value(vv)))
+            .collect()),
+        _ => Err(RelayError::Type(format!("{sig} expects dict/json object"))),
+    }
+}
+
+fn parse_schema_rule(
+    field: &str,
+    spec: &Value,
+) -> RResult<(String, bool, Option<String>, Option<Value>)> {
+    let mut required = true;
+    let mut field_name = field.to_string();
+    if let Some(stripped) = field.strip_suffix('?') {
+        required = false;
+        field_name = stripped.to_string();
+    }
+
+    match spec {
+        Value::Str(ty) => Ok((field_name, required, Some(ty.clone()), None)),
+        Value::Dict(rule) => {
+            let mut expected_type = None;
+            let mut default = None;
+            if let Some(Value::Str(ty)) = rule.get("type") {
+                expected_type = Some(ty.clone());
+            }
+            if let Some(v) = rule.get("required") {
+                required = bool_from_value(v, "validate required flag")?;
+            }
+            if let Some(v) = rule.get("default") {
+                default = Some(v.clone());
+            }
+            if expected_type.is_none() && default.is_none() {
+                return Err(RelayError::Type(format!(
+                    "validate(schema): rule for '{field_name}' needs 'type' or 'default'"
+                )));
+            }
+            Ok((field_name, required, expected_type, default))
+        }
+        _ => Err(RelayError::Type(format!(
+            "validate(schema): invalid schema for field '{field_name}'"
+        ))),
+    }
+}
+
+fn validate_data_with_schema(data: Value, schema: Value, sig: &str) -> RResult<Value> {
+    let mut input = expect_object_like(data, sig)?;
+    let schema_map = expect_object_like(schema, sig)?;
+
+    for (raw_key, rule) in schema_map {
+        let (field, required, expected_type, default) = parse_schema_rule(&raw_key, &rule)?;
+        let existing = input.get(&field).cloned();
+
+        match (existing, expected_type, default) {
+            (Some(v), Some(expected_ty), _) => {
+                let coerced = coerce_param_type(&expected_ty, v).map_err(|e| {
+                    RelayError::Type(format!("validate({field}): {e}"))
+                })?;
+                input.insert(field, coerced);
+            }
+            (Some(_), None, Some(default)) => {
+                input.insert(field, default);
+            }
+            (None, _, Some(default)) => {
+                input.insert(field, default);
+            }
+            (None, Some(_), None) => {
+                if required {
+                    return Err(RelayError::Type(format!(
+                        "validate({field}): missing required field"
+                    )));
+                }
+            }
+            (None, None, None) if required => {
+                return Err(RelayError::Type(format!(
+                    "validate({field}): missing required field"
+                )))
+            }
+            (None, None, None) => {}
+            (Some(_), None, None) => {}
+        }
+    }
+
+    Ok(Value::Dict(input))
 }
 
 fn value_to_json(v: &Value) -> J {
@@ -3026,22 +3653,77 @@ struct WebAppHandle {
 #[derive(Clone)]
 struct RouteHandle {
     app: WebAppHandle,
+    prefix: String,
 }
 #[derive(Clone)]
 struct WebServerHandle;
 
-#[derive(Default)]
 struct AppState {
     routes: Vec<RouteSpec>,
     middlewares: Vec<String>,
     static_mounts: Vec<StaticMount>,
     sessions: HashMap<String, IndexMap<String, Value>>,
+    session_config: SessionConfig,
+    openapi: Option<OpenApiConfig>,
+    session_backend: SessionBackendConfig,
+}
+
+#[derive(Clone)]
+struct SessionConfig {
+    secure: Option<bool>, // None => auto (https only)
+    http_only: bool,
+    same_site: String,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            secure: None,
+            http_only: true,
+            same_site: "Lax".to_string(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct OpenApiConfig {
+    title: String,
+    version: String,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            routes: Vec::new(),
+            middlewares: Vec::new(),
+            static_mounts: Vec::new(),
+            sessions: HashMap::new(),
+            session_config: SessionConfig::default(),
+            openapi: None,
+            session_backend: SessionBackendConfig::Memory,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum SessionBackendConfig {
+    Memory,
+    Callback { load_fn: String, save_fn: String },
 }
 #[derive(Clone)]
 struct RouteSpec {
     method: String,
     path: String,
     fn_name: String,
+    validation: RouteValidation,
+}
+
+#[derive(Clone, Default)]
+struct RouteValidation {
+    validate_schema: Option<Value>,
+    query_schema: Option<Value>,
+    body_schema: Option<Value>,
+    json_schema: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -3064,22 +3746,59 @@ impl WebAppHandle {
 
     // Back-compat: route handle style (route = app.route(); @route.get("/"))
     fn route(&self) -> RouteHandle {
-        RouteHandle { app: self.clone() }
+        RouteHandle {
+            app: self.clone(),
+            prefix: String::new(),
+        }
+    }
+
+    fn group(&self, prefix: String) -> RouteHandle {
+        RouteHandle {
+            app: self.clone(),
+            prefix: normalize_group_prefix(&prefix),
+        }
     }
 
     // New spec: decorator attaches directly to the app: @app.get("/"), @app.post("/")
-    fn register(&self, method: String, path: String, fn_name: String) {
+    fn register(
+        &self,
+        method: String,
+        path: String,
+        fn_name: String,
+        validation: RouteValidation,
+    ) {
         let mut st = self.inner.lock().unwrap();
         st.routes.push(RouteSpec {
             method,
             path,
             fn_name,
+            validation,
         });
     }
 
     fn use_middleware(&self, fn_name: String) {
         let mut st = self.inner.lock().unwrap();
         st.middlewares.push(fn_name);
+    }
+
+    fn set_session_config(&self, cfg: SessionConfig) {
+        let mut st = self.inner.lock().unwrap();
+        st.session_config = cfg;
+    }
+
+    fn session_config(&self) -> SessionConfig {
+        let st = self.inner.lock().unwrap();
+        st.session_config.clone()
+    }
+
+    fn set_openapi(&self, cfg: OpenApiConfig) {
+        let mut st = self.inner.lock().unwrap();
+        st.openapi = Some(cfg);
+    }
+
+    fn openapi_config(&self) -> Option<OpenApiConfig> {
+        let st = self.inner.lock().unwrap();
+        st.openapi.clone()
     }
 
     fn mount_static(&self, route_prefix: String, dir: String) {
@@ -3101,14 +3820,40 @@ impl WebAppHandle {
         let mut st = self.inner.lock().unwrap();
         st.sessions.insert(sid, data);
     }
+
+    fn set_session_backend(&self, backend: SessionBackendConfig) {
+        let mut st = self.inner.lock().unwrap();
+        st.session_backend = backend;
+    }
+
+    fn session_backend(&self) -> SessionBackendConfig {
+        let st = self.inner.lock().unwrap();
+        st.session_backend.clone()
+    }
 }
 impl RouteHandle {
-    fn register(&self, method: String, path: String, fn_name: String) {
+    fn group(&self, prefix: String) -> RouteHandle {
+        let prefix = join_route_prefix(&self.prefix, &prefix);
+        RouteHandle {
+            app: self.app.clone(),
+            prefix,
+        }
+    }
+
+    fn register(
+        &self,
+        method: String,
+        path: String,
+        fn_name: String,
+        validation: RouteValidation,
+    ) {
+        let full_path = join_route_prefix(&self.prefix, &path);
         let mut st = self.app.inner.lock().unwrap();
         st.routes.push(RouteSpec {
             method,
-            path,
+            path: full_path,
             fn_name,
+            validation,
         });
     }
 }
@@ -3118,6 +3863,8 @@ impl RouteHandle {
 struct RequestParts {
     method: String,
     path: String,
+    request_id: String,
+    route_validation: RouteValidation,
     path_params: HashMap<String, String>,
     query: HashMap<String, String>,
     json: Option<J>,
@@ -3162,9 +3909,13 @@ fn get_global_callback() -> Option<HandlerCb> {
 }
 
 async fn run_app(app: WebAppHandle) -> RResult<()> {
-    let (specs, static_mounts) = {
+    let (specs, static_mounts, openapi_cfg) = {
         let state = app.inner.lock().unwrap();
-        (state.routes.clone(), state.static_mounts.clone())
+        (
+            state.routes.clone(),
+            state.static_mounts.clone(),
+            state.openapi.clone(),
+        )
     };
     let mut router = Router::new();
 
@@ -3208,18 +3959,45 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
             .route(&path_pattern, get(static_handler));
     }
 
+    if let Some(cfg) = openapi_cfg {
+        let doc = build_openapi_doc(&specs, &cfg.title, &cfg.version);
+        router = router.route(
+            "/openapi.json",
+            get(move || {
+                let doc = doc.clone();
+                async move {
+                    let response = Response {
+                        status: 200,
+                        content_type: "application/json".into(),
+                        body: doc.to_string().into_bytes(),
+                        headers: HashMap::new(),
+                        set_cookies: vec![],
+                    };
+                    Ok::<_, (StatusCode, String)>(
+                        value_to_axum_response(Value::Response(response))
+                            .await
+                            .into_response(),
+                    )
+                }
+            }),
+        );
+    }
+
     for r in specs {
         let method = r.method.to_lowercase();
         let path = relay_path_to_axum(&r.path);
         let fn_name = r.fn_name.clone();
         let route_path = r.path.clone();
+        let route_validation = r.validation.clone();
         let app_handle = app.clone();
 
         let http_fn_name = fn_name.clone();
         let http_route_path = route_path.clone();
+        let http_route_validation = route_validation.clone();
         let http_app_handle = app_handle.clone();
         let ws_fn_name = fn_name.clone();
         let ws_route_path = route_path.clone();
+        let ws_route_validation = route_validation.clone();
         let ws_app_handle = app_handle.clone();
 
         // define handlers in THIS scope so route registration can capture them
@@ -3230,6 +4008,7 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                             body: Bytes| {
             let fn_name = http_fn_name.clone();
             let route_path = http_route_path.clone();
+            let route_validation = http_route_validation.clone();
             let app_handle = http_app_handle.clone();
             async move {
                 let mut h = HashMap::new();
@@ -3240,11 +4019,18 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                 }
                 let cookies = parse_cookie_header(h.get("cookie").cloned());
                 let session_id = cookies.get("relay_sid").cloned();
+                let request_id = h
+                    .get("x-request-id")
+                    .cloned()
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or_else(new_request_id);
                 let (json_body, form_body) = parse_request_body(&headers, &body);
 
                 let req = RequestParts {
                     method: method.to_string(),
                     path: route_path,
+                    request_id: request_id.clone(),
+                    route_validation,
                     path_params: ax_path,
                     query: q,
                     json: json_body,
@@ -3262,9 +4048,16 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                     )
                 })?;
 
-                let v = cb(app_handle, fn_name, req)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                let v = match cb(app_handle, fn_name, req).await {
+                    Ok(v) => v,
+                    Err(e) => Value::Response(error_response(
+                        500,
+                        "internal_error",
+                        &e.to_string(),
+                        None,
+                        Some(request_id),
+                    )),
+                };
 
                 Ok::<_, (StatusCode, String)>(value_to_axum_response(v).await.into_response())
             }
@@ -3276,6 +4069,7 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                                headers: HeaderMap| {
             let fn_name = ws_fn_name.clone();
             let route_path = ws_route_path.clone();
+            let route_validation = ws_route_validation.clone();
             let app_handle = ws_app_handle.clone();
             async move {
                 let mut h = HashMap::new();
@@ -3286,6 +4080,11 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                 }
                 let cookies = parse_cookie_header(h.get("cookie").cloned());
                 let session_id = cookies.get("relay_sid").cloned();
+                let request_id = h
+                    .get("x-request-id")
+                    .cloned()
+                    .filter(|v| !v.trim().is_empty())
+                    .unwrap_or_else(new_request_id);
 
                 let response = ws.on_upgrade(move |socket| async move {
                     let cb = match get_global_callback() {
@@ -3299,6 +4098,8 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                     let req = RequestParts {
                         method: "WS".to_string(),
                         path: route_path,
+                        request_id,
+                        route_validation,
                         path_params: ax_path,
                         query: q,
                         json: None,
@@ -3388,6 +4189,35 @@ fn parse_cookie_header(raw: Option<String>) -> HashMap<String, String> {
     out
 }
 
+fn normalize_group_prefix(prefix: &str) -> String {
+    if prefix.trim().is_empty() || prefix == "/" {
+        return String::new();
+    }
+    let mut p = prefix.trim().to_string();
+    if !p.starts_with('/') {
+        p.insert(0, '/');
+    }
+    p.trim_end_matches('/').to_string()
+}
+
+fn join_route_prefix(prefix: &str, path: &str) -> String {
+    let pfx = normalize_group_prefix(prefix);
+    let leaf = if path.is_empty() {
+        "/".to_string()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    if pfx.is_empty() {
+        leaf
+    } else if leaf == "/" {
+        pfx
+    } else {
+        format!("{pfx}{leaf}")
+    }
+}
+
 fn new_session_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -3395,6 +4225,107 @@ fn new_session_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("rsid_{now:x}")
+}
+
+fn new_request_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("rid_{now:x}")
+}
+
+fn request_is_https(headers: &HashMap<String, String>) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+fn bool_from_value(v: &Value, sig: &str) -> RResult<bool> {
+    match v {
+        Value::Bool(b) => Ok(*b),
+        Value::Int(i) => Ok(*i != 0),
+        Value::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Ok(true),
+            "false" | "0" | "no" | "off" => Ok(false),
+            _ => Err(RelayError::Type(format!("{sig} expects bool"))),
+        },
+        _ => Err(RelayError::Type(format!("{sig} expects bool"))),
+    }
+}
+
+fn build_session_cookie(
+    sid: &str,
+    session_cfg: &SessionConfig,
+    request_headers: &HashMap<String, String>,
+) -> String {
+    let mut attrs = vec![format!("relay_sid={sid}"), "Path=/".to_string()];
+    if session_cfg.http_only {
+        attrs.push("HttpOnly".to_string());
+    }
+    attrs.push(format!("SameSite={}", session_cfg.same_site));
+    let secure = session_cfg
+        .secure
+        .unwrap_or_else(|| request_is_https(request_headers));
+    if secure {
+        attrs.push("Secure".to_string());
+    }
+    attrs.join("; ")
+}
+
+fn error_response(
+    status: u16,
+    code: &str,
+    message: &str,
+    details: Option<J>,
+    request_id: Option<String>,
+) -> Response {
+    let mut error_obj = serde_json::Map::new();
+    error_obj.insert("code".into(), J::String(code.to_string()));
+    error_obj.insert("message".into(), J::String(message.to_string()));
+    if let Some(d) = details {
+        error_obj.insert("details".into(), d);
+    }
+    if let Some(rid) = request_id.clone() {
+        error_obj.insert("request_id".into(), J::String(rid));
+    }
+
+    let mut root = serde_json::Map::new();
+    root.insert("error".into(), J::Object(error_obj));
+
+    let mut headers = HashMap::new();
+    if let Some(rid) = request_id {
+        headers.insert("x-request-id".into(), rid);
+    }
+
+    Response {
+        status,
+        content_type: "application/json".into(),
+        body: J::Object(root).to_string().into_bytes(),
+        headers,
+        set_cookies: vec![],
+    }
+}
+
+fn status_to_error_code(status: u16) -> &'static str {
+    match status {
+        400 => "bad_request",
+        401 => "unauthorized",
+        403 => "forbidden",
+        404 => "not_found",
+        405 => "method_not_allowed",
+        409 => "conflict",
+        422 => "validation_error",
+        429 => "rate_limited",
+        500 => "internal_error",
+        502 => "bad_gateway",
+        503 => "service_unavailable",
+        504 => "gateway_timeout",
+        _ if (400..500).contains(&status) => "client_error",
+        _ => "server_error",
+    }
 }
 
 fn relay_path_to_axum(p: &str) -> String {
@@ -3416,6 +4347,64 @@ fn relay_path_to_axum(p: &str) -> String {
         i += 1;
     }
     out
+}
+
+fn relay_path_to_openapi(p: &str) -> String {
+    let mut out = String::new();
+    let bytes = p.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] as char == '<' {
+            if let Some(end) = p[i + 1..].find('>') {
+                let name = &p[i + 1..i + 1 + end];
+                out.push('{');
+                out.push_str(name);
+                out.push('}');
+                i += end + 2;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn build_openapi_doc(specs: &[RouteSpec], title: &str, version: &str) -> J {
+    let mut paths = serde_json::Map::new();
+
+    for r in specs {
+        if r.method.eq_ignore_ascii_case("ws") {
+            continue;
+        }
+        let path = relay_path_to_openapi(&r.path);
+        let method = r.method.to_ascii_lowercase();
+        let mut op = serde_json::Map::new();
+        op.insert("operationId".into(), J::String(r.fn_name.clone()));
+        op.insert(
+            "responses".into(),
+            serde_json::json!({
+                "200": { "description": "Success" },
+                "400": { "description": "Bad Request" },
+                "500": { "description": "Internal Server Error" }
+            }),
+        );
+        let path_entry = paths
+            .entry(path)
+            .or_insert_with(|| J::Object(serde_json::Map::new()));
+        if let J::Object(method_map) = path_entry {
+            method_map.insert(method, J::Object(op));
+        }
+    }
+
+    serde_json::json!({
+        "openapi": "3.0.0",
+        "info": {
+            "title": title,
+            "version": version
+        },
+        "paths": J::Object(paths)
+    })
 }
 
 fn normalize_static_route_prefix(prefix: &str) -> String {
@@ -3601,6 +4590,88 @@ async fn value_to_axum_response(v: Value) -> axum::response::Response {
 struct HttpHandle {
     client: reqwest::Client,
 }
+
+fn parse_headers_value(v: Value, sig: &str) -> RResult<HashMap<String, String>> {
+    match v {
+        Value::None => Ok(HashMap::new()),
+        Value::Dict(m) => {
+            let mut out = HashMap::new();
+            for (k, vv) in m {
+                out.insert(k, vv.repr());
+            }
+            Ok(out)
+        }
+        Value::Json(J::Object(obj)) => {
+            let mut out = HashMap::new();
+            for (k, vv) in obj {
+                out.insert(k, vv.to_string().trim_matches('"').to_string());
+            }
+            Ok(out)
+        }
+        _ => Err(RelayError::Type(format!("{sig} headers must be dict/json object"))),
+    }
+}
+
+fn apply_http_body(req: reqwest::RequestBuilder, data: Value) -> reqwest::RequestBuilder {
+    match data {
+        Value::None => req,
+        Value::Json(j) => req.json(&j),
+        Value::Dict(m) => {
+            let mut obj = serde_json::Map::new();
+            for (k, vv) in m {
+                obj.insert(k, value_to_json(&vv));
+            }
+            req.json(&J::Object(obj))
+        }
+        Value::Str(s) => req.body(s),
+        Value::Bytes(b) => req.body(b),
+        other => req.body(other.repr()),
+    }
+}
+
+async fn execute_http_request(
+    client: reqwest::Client,
+    method: &str,
+    url: String,
+    data: Value,
+    headers: HashMap<String, String>,
+) -> RResult<Value> {
+    let mut req = match method {
+        "GET" => client.get(url),
+        "POST" => client.post(url),
+        "PUT" => client.put(url),
+        "PATCH" => client.patch(url),
+        "DELETE" => client.delete(url),
+        _ => return Err(RelayError::Runtime(format!("Unsupported HTTP method: {method}"))),
+    };
+
+    for (k, v) in headers {
+        req = req.header(&k, &v);
+    }
+    req = apply_http_body(req, data);
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| RelayError::Runtime(e.to_string()))?;
+    let status = resp.status().as_u16();
+    let headers = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect::<HashMap<_, _>>();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| RelayError::Runtime(e.to_string()))?
+        .to_vec();
+    Ok(Value::Obj(Object::HttpResponse(HttpResponseHandle {
+        status,
+        headers,
+        body: bytes,
+    })))
+}
+
 impl HttpHandle {
     fn new() -> Self {
         Self {
@@ -3611,76 +4682,116 @@ impl HttpHandle {
         // bound method: (args, kwargs) -> Deferred<HttpResponse>
         let client = self.client.clone();
         match name {
-            "get" => Value::Builtin(Arc::new(move |args, _| {
+            "get" => Value::Builtin(Arc::new(move |args, kwargs| {
                 let client = client.clone();
                 Box::pin(async move {
                     let url = expect_str(&args, 0, "http.get(url)")?;
+                    let headers = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "headers")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(1).cloned())
+                        .map(|v| parse_headers_value(v, "http.get(url, headers=...)"))
+                        .transpose()?
+                        .unwrap_or_default();
                     let d = Deferred::new(Box::pin(async move {
-                        let resp = client
-                            .get(url)
-                            .send()
-                            .await
-                            .map_err(|e| RelayError::Runtime(e.to_string()))?;
-                        let status = resp.status().as_u16();
-                        let headers = resp
-                            .headers()
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                            .collect::<HashMap<_, _>>();
-                        let bytes = resp
-                            .bytes()
-                            .await
-                            .map_err(|e| RelayError::Runtime(e.to_string()))?
-                            .to_vec();
-                        Ok(Value::Obj(Object::HttpResponse(HttpResponseHandle {
-                            status,
-                            headers,
-                            body: bytes,
-                        })))
+                        execute_http_request(client, "GET", url, Value::None, headers).await
                     }));
                     Ok(Value::Deferred(Arc::new(d)))
                 })
             })),
-            "post" => Value::Builtin(Arc::new(move |args, _| {
+            "post" => Value::Builtin(Arc::new(move |args, kwargs| {
                 let client = client.clone();
                 Box::pin(async move {
                     let url = expect_str(&args, 0, "http.post(url, data)")?;
-                    let data = args.get(1).cloned().unwrap_or(Value::None);
+                    let data = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "data")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(1).cloned())
+                        .unwrap_or(Value::None);
+                    let headers = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "headers")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(2).cloned())
+                        .map(|v| parse_headers_value(v, "http.post(url, data, headers=...)"))
+                        .transpose()?
+                        .unwrap_or_default();
                     let d = Deferred::new(Box::pin(async move {
-                        let req = client.post(url);
-                        let req = match data {
-                            Value::Json(j) => req.json(&j),
-                            Value::Dict(m) => {
-                                let mut obj = serde_json::Map::new();
-                                for (k, vv) in m {
-                                    obj.insert(k, J::String(vv.repr()));
-                                }
-                                req.json(&J::Object(obj))
-                            }
-                            Value::Str(s) => req.body(s),
-                            Value::Bytes(b) => req.body(b),
-                            other => req.body(other.repr()),
-                        };
-                        let resp = req
-                            .send()
-                            .await
-                            .map_err(|e| RelayError::Runtime(e.to_string()))?;
-                        let status = resp.status().as_u16();
-                        let headers = resp
-                            .headers()
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                            .collect::<HashMap<_, _>>();
-                        let bytes = resp
-                            .bytes()
-                            .await
-                            .map_err(|e| RelayError::Runtime(e.to_string()))?
-                            .to_vec();
-                        Ok(Value::Obj(Object::HttpResponse(HttpResponseHandle {
-                            status,
-                            headers,
-                            body: bytes,
-                        })))
+                        execute_http_request(client, "POST", url, data, headers).await
+                    }));
+                    Ok(Value::Deferred(Arc::new(d)))
+                })
+            })),
+            "put" => Value::Builtin(Arc::new(move |args, kwargs| {
+                let client = client.clone();
+                Box::pin(async move {
+                    let url = expect_str(&args, 0, "http.put(url, data)")?;
+                    let data = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "data")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(1).cloned())
+                        .unwrap_or(Value::None);
+                    let headers = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "headers")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(2).cloned())
+                        .map(|v| parse_headers_value(v, "http.put(url, data, headers=...)"))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let d = Deferred::new(Box::pin(async move {
+                        execute_http_request(client, "PUT", url, data, headers).await
+                    }));
+                    Ok(Value::Deferred(Arc::new(d)))
+                })
+            })),
+            "patch" => Value::Builtin(Arc::new(move |args, kwargs| {
+                let client = client.clone();
+                Box::pin(async move {
+                    let url = expect_str(&args, 0, "http.patch(url, data)")?;
+                    let data = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "data")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(1).cloned())
+                        .unwrap_or(Value::None);
+                    let headers = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "headers")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(2).cloned())
+                        .map(|v| parse_headers_value(v, "http.patch(url, data, headers=...)"))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let d = Deferred::new(Box::pin(async move {
+                        execute_http_request(client, "PATCH", url, data, headers).await
+                    }));
+                    Ok(Value::Deferred(Arc::new(d)))
+                })
+            })),
+            "delete" => Value::Builtin(Arc::new(move |args, kwargs| {
+                let client = client.clone();
+                Box::pin(async move {
+                    let url = expect_str(&args, 0, "http.delete(url)")?;
+                    let data = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "data")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(1).cloned())
+                        .unwrap_or(Value::None);
+                    let headers = kwargs
+                        .iter()
+                        .find(|(k, _)| k == "headers")
+                        .map(|(_, v)| v.clone())
+                        .or_else(|| args.get(2).cloned())
+                        .map(|v| parse_headers_value(v, "http.delete(url, headers=...)"))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let d = Deferred::new(Box::pin(async move {
+                        execute_http_request(client, "DELETE", url, data, headers).await
                     }));
                     Ok(Value::Deferred(Arc::new(d)))
                 })
@@ -3700,6 +4811,12 @@ impl HttpResponseHandle {
     fn get_member(&self, name: &str) -> Value {
         match name {
             "status" => Value::Int(self.status as i64),
+            "headers" => Value::Dict(
+                self.headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                    .collect(),
+            ),
             "text" => {
                 let s = String::from_utf8_lossy(&self.body).to_string();
                 Value::Str(s)
@@ -3713,6 +4830,153 @@ impl HttpResponseHandle {
                         let j: J = serde_json::from_str(&s)
                             .map_err(|e| RelayError::Runtime(e.to_string()))?;
                         Ok(Value::Json(j))
+                    })
+                }))
+            }
+            _ => Value::None,
+        }
+    }
+}
+
+#[derive(Clone)]
+enum AuthStoreBackend {
+    Memory(Arc<tokio::sync::Mutex<HashMap<String, String>>>),
+    Callback {
+        load_fn: String,
+        save_fn: String,
+        evaluator: Arc<Evaluator>,
+    },
+}
+
+#[derive(Clone)]
+struct AuthStoreHandle {
+    backend: AuthStoreBackend,
+}
+
+impl AuthStoreHandle {
+    fn memory() -> Self {
+        Self {
+            backend: AuthStoreBackend::Memory(Arc::new(tokio::sync::Mutex::new(HashMap::new()))),
+        }
+    }
+
+    fn callback(evaluator: Arc<Evaluator>, load_fn: String, save_fn: String) -> Self {
+        Self {
+            backend: AuthStoreBackend::Callback {
+                load_fn,
+                save_fn,
+                evaluator,
+            },
+        }
+    }
+
+    async fn load_hash(&self, username: String) -> RResult<Option<String>> {
+        match &self.backend {
+            AuthStoreBackend::Memory(store) => Ok(store.lock().await.get(&username).cloned()),
+            AuthStoreBackend::Callback {
+                load_fn,
+                evaluator,
+                ..
+            } => {
+                let out = evaluator
+                    .call_named_function(load_fn, vec![Value::Str(username)])
+                    .await?;
+                match out {
+                    Value::None => Ok(None),
+                    Value::Str(s) => Ok(Some(s)),
+                    other => Err(RelayError::Type(format!(
+                        "auth load callback must return str/None, got {}",
+                        value_type_name(&other)
+                    ))),
+                }
+            }
+        }
+    }
+
+    async fn save_hash(&self, username: String, hash: String) -> RResult<()> {
+        match &self.backend {
+            AuthStoreBackend::Memory(store) => {
+                store.lock().await.insert(username, hash);
+                Ok(())
+            }
+            AuthStoreBackend::Callback {
+                save_fn,
+                evaluator,
+                ..
+            } => {
+                let _ = evaluator
+                    .call_named_function(save_fn, vec![Value::Str(username), Value::Str(hash)])
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    fn get_member(&self, name: &str) -> Value {
+        match name {
+            "set_hash" => {
+                let store = self.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let store = store.clone();
+                    Box::pin(async move {
+                        let username = expect_str(&args, 0, "auth_store.set_hash(username, hash)")?;
+                        let hash = expect_str(&args, 1, "auth_store.set_hash(username, hash)")?;
+                        store.save_hash(username, hash).await?;
+                        Ok(Value::None)
+                    })
+                }))
+            }
+            "get_hash" => {
+                let store = self.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let store = store.clone();
+                    Box::pin(async move {
+                        let username = expect_str(&args, 0, "auth_store.get_hash(username)")?;
+                        match store.load_hash(username).await? {
+                            Some(hash) => Ok(Value::Str(hash)),
+                            None => Ok(Value::None),
+                        }
+                    })
+                }))
+            }
+            "register" => {
+                let store = self.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let store = store.clone();
+                    Box::pin(async move {
+                        let username =
+                            expect_str(&args, 0, "auth_store.register(username, password)")?;
+                        let password =
+                            expect_str(&args, 1, "auth_store.register(username, password)")?;
+                        let salt = SaltString::generate(&mut OsRng);
+                        let hash = Argon2::default()
+                            .hash_password(password.as_bytes(), &salt)
+                            .map_err(|e| RelayError::Runtime(e.to_string()))?
+                            .to_string();
+                        store.save_hash(username, hash).await?;
+                        Ok(Value::Bool(true))
+                    })
+                }))
+            }
+            "verify" => {
+                let store = self.clone();
+                Value::Builtin(Arc::new(move |args, _| {
+                    let store = store.clone();
+                    Box::pin(async move {
+                        let username = expect_str(&args, 0, "auth_store.verify(username, password)")?;
+                        let password = expect_str(&args, 1, "auth_store.verify(username, password)")?;
+                        let Some(hash) = store.load_hash(username).await? else {
+                            return Ok(Value::Bool(false));
+                        };
+                        let parsed = match PasswordHash::new(&hash) {
+                            Ok(h) => h,
+                            Err(_) => return Ok(Value::Bool(false)),
+                        };
+                        Ok(Value::Bool(
+                            Argon2::default()
+                                .verify_password(password.as_bytes(), &parsed)
+                                .is_ok(),
+                        ))
                     })
                 }))
             }
@@ -3989,6 +5253,16 @@ impl Object {
                         Box::pin(async move { Ok(Value::Obj(Object::Route(a.route()))) })
                     }))
                 }
+                "group" => {
+                    let a = a.clone();
+                    Value::Builtin(Arc::new(move |args, _| {
+                        let a = a.clone();
+                        Box::pin(async move {
+                            let prefix = expect_str(&args, 0, "app.group(prefix)")?;
+                            Ok(Value::Obj(Object::Route(a.group(prefix))))
+                        })
+                    }))
+                }
                 "redirect" => Value::Builtin(Arc::new(move |args, _| {
                     Box::pin(async move {
                         let location = expect_str(&args, 0, "app.redirect(location)")?;
@@ -4048,9 +5322,129 @@ impl Object {
                         })
                     }))
                 }
+                "openapi" => {
+                    let a = a.clone();
+                    Value::Builtin(Arc::new(move |args, kwargs| {
+                        let a = a.clone();
+                        Box::pin(async move {
+                            let title = kwargs
+                                .iter()
+                                .find(|(k, _)| k == "title")
+                                .map(|(_, v)| v.clone())
+                                .or_else(|| args.get(0).cloned())
+                                .unwrap_or(Value::Str("Relay API".into()))
+                                .repr();
+                            let version = kwargs
+                                .iter()
+                                .find(|(k, _)| k == "version")
+                                .map(|(_, v)| v.clone())
+                                .or_else(|| args.get(1).cloned())
+                                .unwrap_or(Value::Str("1.0.0".into()))
+                                .repr();
+                            a.set_openapi(OpenApiConfig { title, version });
+                            Ok(Value::None)
+                        })
+                    }))
+                }
+                "session" => {
+                    let a = a.clone();
+                    Value::Builtin(Arc::new(move |args, kwargs| {
+                        let a = a.clone();
+                        Box::pin(async move {
+                            let mut cfg = a.session_config();
+
+                            if let Some(v) = args.get(0) {
+                                cfg.secure = Some(bool_from_value(v, "app.session(secure=...)")?);
+                            }
+                            if let Some(v) = args.get(1) {
+                                cfg.same_site = v.repr();
+                            }
+
+                            for (k, v) in kwargs {
+                                match k.as_str() {
+                                    "secure" => {
+                                        cfg.secure =
+                                            Some(bool_from_value(&v, "app.session(secure=...)")?)
+                                    }
+                                    "http_only" => {
+                                        cfg.http_only =
+                                            bool_from_value(&v, "app.session(http_only=...)")?
+                                    }
+                                    "same_site" => cfg.same_site = v.repr(),
+                                    _ => {}
+                                }
+                            }
+
+                            a.set_session_config(cfg);
+                            Ok(Value::None)
+                        })
+                    }))
+                }
+                "session_backend" => {
+                    let a = a.clone();
+                    Value::Builtin(Arc::new(move |args, _| {
+                        let a = a.clone();
+                        Box::pin(async move {
+                            let load_fn = args
+                                .get(0)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    RelayError::Type(
+                                        "app.session_backend(load_fn, save_fn) expects load_fn"
+                                            .into(),
+                                    )
+                                })?;
+                            let save_fn = args
+                                .get(1)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    RelayError::Type(
+                                        "app.session_backend(load_fn, save_fn) expects save_fn"
+                                            .into(),
+                                    )
+                                })?;
+                            let load_fn = match load_fn {
+                                Value::Function(f) => f.name.clone(),
+                                _ => {
+                                    return Err(RelayError::Type(
+                                        "app.session_backend(load_fn, save_fn) expects functions"
+                                            .into(),
+                                    ))
+                                }
+                            };
+                            let save_fn = match save_fn {
+                                Value::Function(f) => f.name.clone(),
+                                _ => {
+                                    return Err(RelayError::Type(
+                                        "app.session_backend(load_fn, save_fn) expects functions"
+                                            .into(),
+                                    ))
+                                }
+                            };
+
+                            a.set_session_backend(SessionBackendConfig::Callback {
+                                load_fn,
+                                save_fn,
+                            });
+                            Ok(Value::None)
+                        })
+                    }))
+                }
                 _ => Value::None,
             },
-            Object::Route(_r) => Value::None, // decorators handle route registration
+            Object::Route(r) => match name {
+                "group" => {
+                    let r = r.clone();
+                    Value::Builtin(Arc::new(move |args, _| {
+                        let r = r.clone();
+                        Box::pin(async move {
+                            let prefix = expect_str(&args, 0, "route.group(prefix)")?;
+                            Ok(Value::Obj(Object::Route(r.group(prefix))))
+                        })
+                    }))
+                }
+                _ => Value::None,
+            },
             Object::WebServer(s) => match name {
                 "run" => {
                     let s = s.clone();
@@ -4128,6 +5522,7 @@ impl Object {
             },
             Object::Http(h) => h.get_member(name),
             Object::HttpResponse(r) => r.get_member(name),
+            Object::AuthStore(a) => a.get_member(name),
             Object::MongoClient(m) => m.get_member(name),
             Object::MongoDatabase(d) => d.get_member(name),
             Object::MongoCollection(c) => c.get_member(name),
@@ -4174,6 +5569,8 @@ impl Evaluator {
         let RequestParts {
             method,
             path,
+            request_id,
+            route_validation,
             path_params,
             query,
             json,
@@ -4185,8 +5582,103 @@ impl Evaluator {
         } = req;
 
         let query_map = query.clone();
-        let json_body = json.clone();
+        let mut json_body = json.clone();
         let form_body = form.clone();
+        let headers_map = headers.clone();
+
+        let mut query_values: IndexMap<String, Value> = query_map
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+            .collect();
+        let mut form_values: IndexMap<String, Value> = form
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+            .collect();
+        let mut json_values: Option<IndexMap<String, Value>> = json_body.as_ref().and_then(|j| {
+            if let J::Object(obj) = j {
+                Some(
+                    obj.iter()
+                        .map(|(k, v)| (k.clone(), json_to_value(v)))
+                        .collect::<IndexMap<_, _>>(),
+                )
+            } else {
+                None
+            }
+        });
+
+        let validation_error = |msg: String| {
+            Value::Response(error_response(
+                400,
+                "validation_error",
+                &msg,
+                None,
+                Some(request_id.clone()),
+            ))
+        };
+
+        if let Some(schema) = route_validation.query_schema {
+            let validated = match validate_data_with_schema(
+                Value::Dict(query_values.clone()),
+                schema,
+                "decorator query validate",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Ok(validation_error(e.to_string())),
+            };
+            query_values = expect_object_like(validated, "decorator query validate")?;
+        }
+
+        if let Some(schema) = route_validation.body_schema {
+            let validated = match validate_data_with_schema(
+                Value::Dict(form_values.clone()),
+                schema,
+                "decorator body validate",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Ok(validation_error(e.to_string())),
+            };
+            form_values = expect_object_like(validated, "decorator body validate")?;
+        }
+
+        if let Some(schema) = route_validation.json_schema {
+            let Some(j) = json_body.clone() else {
+                return Ok(validation_error("Missing JSON body".to_string()));
+            };
+            let validated =
+                match validate_data_with_schema(Value::Json(j), schema, "decorator json validate") {
+                    Ok(v) => v,
+                    Err(e) => return Ok(validation_error(e.to_string())),
+                };
+            let map = expect_object_like(validated, "decorator json validate")?;
+            json_body = Some(value_to_json(&Value::Dict(map.clone())));
+            json_values = Some(map);
+        }
+
+        if let Some(schema) = route_validation.validate_schema {
+            if let Some(j) = json_body.clone() {
+                let validated = match validate_data_with_schema(
+                    Value::Json(j),
+                    schema,
+                    "decorator validate",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(validation_error(e.to_string())),
+                };
+                let map = expect_object_like(validated, "decorator validate")?;
+                json_body = Some(value_to_json(&Value::Dict(map.clone())));
+                json_values = Some(map);
+            } else {
+                let validated = match validate_data_with_schema(
+                    Value::Dict(form_values.clone()),
+                    schema,
+                    "decorator validate",
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(validation_error(e.to_string())),
+                };
+                form_values = expect_object_like(validated, "decorator validate")?;
+            }
+        }
 
         // build arg map by param list
         let mut bound: HashMap<String, Value> = HashMap::new();
@@ -4196,18 +5688,18 @@ impl Evaluator {
         }
 
         // start with Query
-        for (k, v) in query {
-            bound.insert(k, Value::Str(v));
+        for (k, v) in &query_values {
+            bound.insert(k.clone(), v.clone());
         }
         // then Body
-        for (k, v) in form {
-            bound.insert(k, Value::Str(v));
+        for (k, v) in &form_values {
+            bound.insert(k.clone(), v.clone());
         }
-        if let Some(j) = json {
+        if let Some(j) = json_body.clone() {
             // JSON object keys are treated like body params for handler arg binding.
-            if let J::Object(obj) = &j {
-                for (k, v) in obj {
-                    bound.insert(k.clone(), json_to_value(v));
+            if let Some(obj_values) = &json_values {
+                for (k, v) in obj_values {
+                    bound.insert(k.clone(), v.clone());
                 }
             }
 
@@ -4256,14 +5748,10 @@ impl Evaluator {
         let mut req_dict = IndexMap::new();
         req_dict.insert("method".into(), Value::Str(method));
         req_dict.insert("path".into(), Value::Str(path));
+        req_dict.insert("request_id".into(), Value::Str(request_id.clone()));
         req_dict.insert(
             "query".into(),
-            Value::Dict(
-                query_map
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
-                    .collect(),
-            ),
+            Value::Dict(query_values.clone()),
         );
         req_dict.insert(
             "headers".into(),
@@ -4283,23 +5771,16 @@ impl Evaluator {
                     .collect(),
             ),
         );
-        if let Some(j) = json_body {
+        if let Some(j) = json_body.clone() {
             req_dict.insert("json".into(), Value::Json(j));
         }
         req_dict.insert(
             "form".into(),
-            Value::Dict(
-                form_body
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
-                    .collect(),
-            ),
+            Value::Dict(form_values.clone()),
         );
 
-        let existing_session = session_id
-            .as_ref()
-            .map(|sid| app.get_session(sid))
-            .unwrap_or_default();
+        let existing_session = self.load_session_data(&app, &session_id).await?;
+        let session_cfg = app.session_config();
 
         // run handler in new scope
         {
@@ -4308,7 +5789,7 @@ impl Evaluator {
             for (k, v) in &bound {
                 env.set(k, v.clone());
             }
-            env.set("request", Value::Dict(req_dict));
+            env.set("request", Value::Dict(req_dict.clone()));
             env.set(
                 "cookies",
                 Value::Dict(
@@ -4324,6 +5805,7 @@ impl Evaluator {
             env.set("session", Value::Dict(existing_session.clone()));
         }
 
+        let mut middlewares = Vec::new();
         for mw_name in app.middleware_names() {
             let mw_value = self.env.lock().await.get(&mw_name)?;
             let mw_func = match mw_value {
@@ -4334,32 +5816,33 @@ impl Evaluator {
                     )))
                 }
             };
-
-            let result = self.eval_block(&mw_func.body).await?;
-            if let Flow::Return(v) = result {
-                if !matches!(v, Value::None) {
-                    let final_session = {
-                        let env = self.env.lock().await;
-                        let locals = env.snapshot_top();
-                        match locals.get("session") {
-                            Some(Value::Dict(m)) => m.clone(),
-                            _ => existing_session.clone(),
-                        }
-                    };
-
-                    {
-                        let mut env = self.env.lock().await;
-                        env.pop();
-                    }
-
-                    return Ok(apply_session_and_cookies(app, session_id, final_session, v));
-                }
-            }
+            middlewares.push(mw_func);
         }
 
-        let out = match self.eval_block(&func.body).await? {
-            Flow::None => Value::None,
-            Flow::Return(v) => v,
+        let evaluator = Arc::new(self.clone());
+        let handler_fn = func.clone();
+        let handler: Arc<dyn Fn() -> BoxFut + Send + Sync> = Arc::new(move || {
+            let evaluator = evaluator.clone();
+            let handler_fn = handler_fn.clone();
+            Box::pin(async move {
+                match evaluator.eval_block(&handler_fn.body).await? {
+                    Flow::None => Ok(Value::None),
+                    Flow::Return(v) => Ok(v),
+                }
+            })
+        });
+
+        let chain_out = if middlewares.is_empty() {
+            (handler)().await
+        } else {
+            Arc::new(self.clone())
+                .run_middleware_chain(
+                    Arc::new(middlewares),
+                    0,
+                    Value::Dict(req_dict.clone()),
+                    handler,
+                )
+                .await
         };
 
         let final_session = {
@@ -4376,9 +5859,11 @@ impl Evaluator {
             env.pop();
         }
 
+        let out = chain_out?;
+
         if websocket.is_some() {
             if let Some(sid) = session_id {
-                app.put_session(sid, final_session);
+                self.persist_session_data(&app, sid, final_session).await?;
             }
             return Ok(Value::None);
         }
@@ -4450,96 +5935,18 @@ impl Evaluator {
 
         if !final_session.is_empty() {
             let sid = session_id.unwrap_or_else(new_session_id);
-            app.put_session(sid.clone(), final_session);
+            self.persist_session_data(&app, sid.clone(), final_session)
+                .await?;
             response
                 .set_cookies
-                .push(format!("relay_sid={sid}; Path=/; HttpOnly; SameSite=Lax"));
+                .push(build_session_cookie(&sid, &session_cfg, &headers_map));
         }
+        response
+            .headers
+            .insert("x-request-id".into(), request_id.clone());
 
         Ok(Value::Response(response))
     }
-}
-
-fn apply_session_and_cookies(
-    app: WebAppHandle,
-    session_id: Option<String>,
-    final_session: IndexMap<String, Value>,
-    out: Value,
-) -> Value {
-    let mut response = match out {
-        Value::Response(r) => r,
-        Value::Json(j) => Response {
-            status: 200,
-            content_type: "application/json".into(),
-            body: j.to_string().into_bytes(),
-            headers: HashMap::new(),
-            set_cookies: vec![],
-        },
-        Value::Dict(m) => {
-            let mut obj = serde_json::Map::new();
-            for (k, vv) in m {
-                obj.insert(k, J::String(vv.repr()));
-            }
-            Response {
-                status: 200,
-                content_type: "application/json".into(),
-                body: J::Object(obj).to_string().into_bytes(),
-                headers: HashMap::new(),
-                set_cookies: vec![],
-            }
-        }
-        Value::List(vs) => {
-            let arr = vs
-                .into_iter()
-                .map(|x| J::String(x.repr()))
-                .collect::<Vec<_>>();
-            Response {
-                status: 200,
-                content_type: "application/json".into(),
-                body: J::Array(arr).to_string().into_bytes(),
-                headers: HashMap::new(),
-                set_cookies: vec![],
-            }
-        }
-        Value::Bytes(b) => Response {
-            status: 200,
-            content_type: "application/octet-stream".into(),
-            body: b,
-            headers: HashMap::new(),
-            set_cookies: vec![],
-        },
-        Value::Str(s) => {
-            let ct = if s.contains("<") || s.contains("{{") {
-                "text/html; charset=utf-8"
-            } else {
-                "text/plain; charset=utf-8"
-            };
-            Response {
-                status: 200,
-                content_type: ct.into(),
-                body: s.into_bytes(),
-                headers: HashMap::new(),
-                set_cookies: vec![],
-            }
-        }
-        other => Response {
-            status: 200,
-            content_type: "text/plain; charset=utf-8".into(),
-            body: other.repr().into_bytes(),
-            headers: HashMap::new(),
-            set_cookies: vec![],
-        },
-    };
-
-    if !final_session.is_empty() {
-        let sid = session_id.unwrap_or_else(new_session_id);
-        app.put_session(sid.clone(), final_session);
-        response
-            .set_cookies
-            .push(format!("relay_sid={sid}; Path=/; HttpOnly; SameSite=Lax"));
-    }
-
-    Value::Response(response)
 }
 
 // ========================= Main =========================
@@ -4714,6 +6121,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn function_type_hints_require_exact_runtime_types() {
+        let src = r#"fn add(a: int, b: int)
+    return a + b
+
+add("5", "10")
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+
+        let err = match evaluator.eval_program(&program).await {
+            Ok(v) => panic!(
+                "typed function should reject string args for int params, got {}",
+                v.repr()
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, RelayError::Type(ref msg) if msg.contains("Expected int, got str")),
+            "expected strict int validation error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn function_type_hints_reject_unknown_types() {
+        let src = r#"fn greet(name: UserId)
+    return name
+
+greet("ada")
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+
+        let err = match evaluator.eval_program(&program).await {
+            Ok(v) => panic!("unknown type hints should fail fast, got {}", v.repr()),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, RelayError::Type(ref msg) if msg.contains("Unknown type hint: UserId")),
+            "expected unknown type hint error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn web_handler_prefers_form_body_over_query() {
         let src = r#"fn submit(content)
     return content
@@ -4742,6 +6202,8 @@ mod tests {
                 RequestParts {
                     method: "POST".to_string(),
                     path: "/".to_string(),
+                    request_id: "test-rid".to_string(),
+                    route_validation: RouteValidation::default(),
                     path_params: HashMap::new(),
                     query,
                     json: None,
@@ -4759,6 +6221,57 @@ mod tests {
             Value::Response(resp) => {
                 let text = String::from_utf8(resp.body).expect("response body should be utf-8");
                 assert_eq!(text, "from-form");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn web_handler_type_hints_still_coerce_query_values() {
+        let src = r#"fn search(limit: int)
+    return str(limit)
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let mut query = HashMap::new();
+        query.insert("limit".to_string(), "10".to_string());
+
+        let out = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "search",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/search".to_string(),
+                    request_id: "test-rid".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query,
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let text = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(text, "10");
             }
             other => panic!("expected response, got {}", other.repr()),
         }
@@ -4791,6 +6304,8 @@ mod tests {
                 RequestParts {
                     method: "POST".to_string(),
                     path: "/".to_string(),
+                    request_id: "test-rid".to_string(),
+                    route_validation: RouteValidation::default(),
                     path_params: HashMap::new(),
                     query,
                     json: Some(serde_json::json!({
@@ -4825,6 +6340,10 @@ mod tests {
 fn from_form()
     payload = get_body()
     return payload["name"]
+
+fn from_query()
+    payload = get_query()
+    return payload["name"]
 "#;
         let program = parse_src(src).expect("program should parse");
         let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
@@ -4845,6 +6364,8 @@ fn from_form()
                 RequestParts {
                     method: "POST".to_string(),
                     path: "/".to_string(),
+                    request_id: "test-rid".to_string(),
+                    route_validation: RouteValidation::default(),
                     path_params: HashMap::new(),
                     query: HashMap::new(),
                     json: Some(serde_json::json!({
@@ -4877,6 +6398,8 @@ fn from_form()
                 RequestParts {
                     method: "POST".to_string(),
                     path: "/".to_string(),
+                    request_id: "test-rid".to_string(),
+                    route_validation: RouteValidation::default(),
                     path_params: HashMap::new(),
                     query: HashMap::new(),
                     json: None,
@@ -4896,6 +6419,827 @@ fn from_form()
                 assert_eq!(text, "from-form-helper");
             }
             other => panic!("expected response, got {}", other.repr()),
+        }
+
+        let mut query = HashMap::new();
+        query.insert("name".to_string(), "from-query-helper".to_string());
+        let out_query = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "from_query",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/".to_string(),
+                    request_id: "test-rid".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query,
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("query helper handler should run");
+
+        match out_query {
+            Value::Response(resp) => {
+                let text = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(text, "from-query-helper");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_error_builtin_returns_structured_json_and_request_id() {
+        let src = r#"fn fail()
+    return HTTPError(400, "bad_request", "Missing field", {"field": "name"})
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let out = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "fail",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/fail".to_string(),
+                    request_id: "rid-test".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                assert_eq!(resp.status, 400);
+                assert_eq!(
+                    resp.headers.get("x-request-id").map(String::as_str),
+                    Some("rid-test")
+                );
+                let body = String::from_utf8(resp.body).expect("response body should be utf-8");
+                let parsed: J = serde_json::from_str(&body).expect("body should be json");
+                assert_eq!(parsed["error"]["code"], J::String("bad_request".to_string()));
+                assert_eq!(
+                    parsed["error"]["message"],
+                    J::String("Missing field".to_string())
+                );
+                assert_eq!(
+                    parsed["error"]["request_id"],
+                    J::String("rid-test".to_string())
+                );
+                assert_eq!(parsed["error"]["details"]["field"], J::String("name".to_string()));
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn web_handler_sets_request_id_header_on_success() {
+        let src = r#"fn ok()
+    return "ok"
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let out = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "ok",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/ok".to_string(),
+                    request_id: "rid-success".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                assert_eq!(
+                    resp.headers.get("x-request-id").map(String::as_str),
+                    Some("rid-success")
+                );
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_supports_ctx_and_next_params() {
+        let src = r#"app = WebApp()
+
+fn mw(ctx, next)
+    if (ctx["path"] == "/hello")
+        session["via"] = "middleware"
+    next()
+
+app.use(mw)
+
+fn handler()
+    return session["via"]
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let app = {
+            let env_lock = env.lock().await;
+            match env_lock.get("app").expect("app should exist") {
+                Value::Obj(Object::WebApp(app)) => app,
+                other => panic!("expected app to be WebApp, got {}", other.repr()),
+            }
+        };
+
+        let out = evaluator
+            .call_web_handler(
+                app,
+                "handler",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/hello".to_string(),
+                    request_id: "rid-mw".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let text = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(text, "middleware");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_next_chain_can_wrap_handler_result() {
+        let src = r#"app = WebApp()
+
+fn mw1(ctx, next)
+    session["trace"] = "a"
+    out = next()
+    return "m1(" + str(out) + ")"
+
+fn mw2(ctx, next)
+    session["trace"] = session["trace"] + "b"
+    out = next()
+    return session["trace"] + ":" + str(out)
+
+app.use(mw1)
+app.use(mw2)
+
+fn handler()
+    return "h"
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let app = {
+            let env_lock = env.lock().await;
+            match env_lock.get("app").expect("app should exist") {
+                Value::Obj(Object::WebApp(app)) => app,
+                other => panic!("expected app to be WebApp, got {}", other.repr()),
+            }
+        };
+
+        let out = evaluator
+            .call_web_handler(
+                app,
+                "handler",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/chain".to_string(),
+                    request_id: "rid-mw-chain".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let body = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(body, "m1(ab:h)");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_next_result_is_used_when_not_returned_explicitly() {
+        let src = r#"app = WebApp()
+
+fn mw(ctx, next)
+    next()
+
+app.use(mw)
+
+fn handler()
+    return "ok"
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let app = {
+            let env_lock = env.lock().await;
+            match env_lock.get("app").expect("app should exist") {
+                Value::Obj(Object::WebApp(app)) => app,
+                other => panic!("expected app to be WebApp, got {}", other.repr()),
+            }
+        };
+
+        let out = evaluator
+            .call_web_handler(
+                app,
+                "handler",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/chain".to_string(),
+                    request_id: "rid-mw-chain-2".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let body = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(body, "ok");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn decorator_query_schema_is_enforced_at_runtime() {
+        let src = r#"app = WebApp()
+schema = {"limit": "int"}
+
+@app.get("/search", query=schema)
+fn search(limit)
+    return str(limit)
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let app = {
+            let env_lock = env.lock().await;
+            match env_lock.get("app").expect("app should exist") {
+                Value::Obj(Object::WebApp(app)) => app,
+                other => panic!("expected app to be WebApp, got {}", other.repr()),
+            }
+        };
+        let route_validation = {
+            let state = app.inner.lock().unwrap();
+            state
+                .routes
+                .first()
+                .expect("route should be registered")
+                .validation
+                .clone()
+        };
+
+        let mut good_query = HashMap::new();
+        good_query.insert("limit".to_string(), "10".to_string());
+        let good = evaluator
+            .call_web_handler(
+                app.clone(),
+                "search",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/search".to_string(),
+                    request_id: "rid-schema-good".to_string(),
+                    route_validation: route_validation.clone(),
+                    path_params: HashMap::new(),
+                    query: good_query,
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("good request should run");
+        match good {
+            Value::Response(resp) => {
+                let body = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(body, "10");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+
+        let mut bad_query = HashMap::new();
+        bad_query.insert("limit".to_string(), "bad".to_string());
+        let bad = evaluator
+            .call_web_handler(
+                app,
+                "search",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/search".to_string(),
+                    request_id: "rid-schema-bad".to_string(),
+                    route_validation,
+                    path_params: HashMap::new(),
+                    query: bad_query,
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("bad request should return validation response");
+        match bad {
+            Value::Response(resp) => {
+                assert_eq!(resp.status, 400);
+                let body = String::from_utf8(resp.body).expect("response body should be utf-8");
+                let parsed: J = serde_json::from_str(&body).expect("body should be json");
+                assert_eq!(
+                    parsed["error"]["code"],
+                    J::String("validation_error".to_string())
+                );
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_backend_callbacks_can_persist_across_requests() {
+        let src = r#"session_db = {}
+app = WebApp()
+
+fn load_session(sid)
+    return session_db[sid]
+
+fn save_session(sid, data)
+    session_db[sid] = data
+
+app.session_backend(load_session, save_session)
+
+fn set_user()
+    session["user"] = "ada"
+    return "ok"
+
+fn get_user()
+    return session["user"]
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let app = {
+            let env_lock = env.lock().await;
+            match env_lock.get("app").expect("app should exist") {
+                Value::Obj(Object::WebApp(app)) => app,
+                other => panic!("expected app to be WebApp, got {}", other.repr()),
+            }
+        };
+
+        let out_set = evaluator
+            .call_web_handler(
+                app.clone(),
+                "set_user",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/set".to_string(),
+                    request_id: "rid-session-a".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("set handler should run");
+
+        let sid = match out_set {
+            Value::Response(resp) => {
+                let cookie = resp
+                    .set_cookies
+                    .first()
+                    .expect("session cookie should be set")
+                    .clone();
+                cookie
+                    .split(';')
+                    .next()
+                    .and_then(|kv| kv.split_once('='))
+                    .map(|(_, v)| v.to_string())
+                    .expect("session cookie should have sid")
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        };
+
+        let out_get = evaluator
+            .call_web_handler(
+                app,
+                "get_user",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/get".to_string(),
+                    request_id: "rid-session-b".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: Some(sid),
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("get handler should run");
+
+        match out_get {
+            Value::Response(resp) => {
+                let body = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(body, "ada");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_hash_and_store_backends_work() {
+        let src = r#"store = AuthStore()
+h = auth_hash_password("secret")
+ok = auth_verify_password("secret", h)
+bad = auth_verify_password("wrong", h)
+
+store.register("ada", "pw")
+store_ok = store.verify("ada", "pw")
+store_bad = store.verify("ada", "nope")
+
+auth_db = {}
+fn load_user(name)
+    return auth_db[name]
+
+fn save_user(name, hash)
+    auth_db[name] = hash
+
+custom = AuthStore(load_user, save_user)
+custom.register("bob", "pw2")
+custom_ok = custom.verify("bob", "pw2")
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let env_lock = env.lock().await;
+        assert!(matches!(env_lock.get("ok").expect("ok"), Value::Bool(true)));
+        assert!(matches!(env_lock.get("bad").expect("bad"), Value::Bool(false)));
+        assert!(matches!(
+            env_lock.get("store_ok").expect("store_ok"),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            env_lock.get("store_bad").expect("store_bad"),
+            Value::Bool(false)
+        ));
+        assert!(matches!(
+            env_lock.get("custom_ok").expect("custom_ok"),
+            Value::Bool(true)
+        ));
+    }
+
+    #[tokio::test]
+    async fn validate_helper_coerces_and_requires_fields() {
+        let src = r#"result = validate({"limit": "10"}, {"limit": "int"})
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let env_lock = env.lock().await;
+        match env_lock.get("result").expect("result should exist") {
+            Value::Dict(map) => {
+                assert!(matches!(map.get("limit"), Some(Value::Int(10))));
+            }
+            other => panic!("expected dict, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn require_query_validates_handler_input() {
+        let src = r#"fn search()
+    params = require_query({"limit": "int"})
+    return str(params["limit"])
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let mut query = HashMap::new();
+        query.insert("limit".to_string(), "25".to_string());
+
+        let out = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "search",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/search".to_string(),
+                    request_id: "rid-validate".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query,
+                    json: None,
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let body = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(body, "25");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_cookie_is_secure_for_https_requests() {
+        let src = r#"fn handler()
+    session["user"] = "ada"
+    return "ok"
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let mut headers = HashMap::new();
+        headers.insert("x-forwarded-proto".to_string(), "https".to_string());
+
+        let out = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "handler",
+                RequestParts {
+                    method: "GET".to_string(),
+                    path: "/".to_string(),
+                    request_id: "rid-cookie".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form: HashMap::new(),
+                    headers,
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let cookie = resp
+                    .set_cookies
+                    .first()
+                    .expect("session write should set cookie");
+                assert!(cookie.contains("Secure"));
+                assert!(cookie.contains("HttpOnly"));
+                assert!(cookie.contains("SameSite=Lax"));
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn route_groups_prefix_registered_paths() {
+        let src = r#"app = WebApp()
+api = app.group("/api")
+v1 = api.group("/v1")
+
+@v1.get("/users/<user_id>")
+fn get_user(user_id)
+    return user_id
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let app = {
+            let env_lock = env.lock().await;
+            match env_lock.get("app").expect("app should exist") {
+                Value::Obj(Object::WebApp(app)) => app,
+                other => panic!("expected app to be WebApp, got {}", other.repr()),
+            }
+        };
+
+        let state = app.inner.lock().unwrap();
+        let route = state.routes.first().expect("one route should be registered");
+        assert_eq!(route.path, "/api/v1/users/<user_id>");
+    }
+
+    #[test]
+    fn openapi_doc_builder_emits_route_paths() {
+        let doc = build_openapi_doc(
+            &[RouteSpec {
+                method: "GET".to_string(),
+                path: "/users/<id>".to_string(),
+                fn_name: "get_user".to_string(),
+                validation: RouteValidation::default(),
+            }],
+            "Relay Test API",
+            "2026.1",
+        );
+
+        assert_eq!(doc["info"]["title"], J::String("Relay Test API".to_string()));
+        assert_eq!(doc["info"]["version"], J::String("2026.1".to_string()));
+        assert!(doc["paths"]["/users/{id}"]["get"].is_object());
+    }
+
+    #[test]
+    fn http_client_exposes_parity_methods_and_headers_member() {
+        let http = HttpHandle::new();
+        assert!(!matches!(http.get_member("put"), Value::None));
+        assert!(!matches!(http.get_member("patch"), Value::None));
+        assert!(!matches!(http.get_member("delete"), Value::None));
+
+        let mut headers = HashMap::new();
+        headers.insert("x-test".to_string(), "ok".to_string());
+        let resp = HttpResponseHandle {
+            status: 200,
+            headers,
+            body: b"ok".to_vec(),
+        };
+
+        match resp.get_member("headers") {
+            Value::Dict(h) => {
+                assert!(matches!(h.get("x-test"), Some(Value::Str(v)) if v == "ok"));
+            }
+            other => panic!("headers should be dict, got {}", other.repr()),
         }
     }
 
