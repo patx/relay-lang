@@ -1,0 +1,36 @@
+app = WebApp()
+server = WebServer()
+
+@app.get("/")
+fn index()
+    return "<h1>Relay handler binding test</h1><p>POST /with-args or /with-helpers</p>"
+
+// Args are bound from query/body/json keys (path params still take highest precedence).
+@app.post("/with-args")
+fn with_args(name, age: int = 0, city = "unknown")
+    return app.json({
+        "mode": "args",
+        "name": name,
+        "age": age,
+        "city": city
+    })
+
+// Zero-arg handlers can read request payloads explicitly.
+@app.post("/with-helpers")
+fn with_helpers()
+    json_data = get_json()
+    if (json_data != None)
+        return app.json({
+            "mode": "helpers-json",
+            "name": str(json_data["name"]),
+            "payload": json_data
+        })
+
+    form_data = get_body()
+    return app.json({
+        "mode": "helpers-form",
+        "name": form_data["name"],
+        "payload": form_data
+    })
+
+server.run(app)

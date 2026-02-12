@@ -2496,6 +2496,49 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
         })),
     );
 
+    let evaluator_for_get_json = evaluator.clone();
+    env.set(
+        "get_json",
+        Value::Builtin(Arc::new(move |_args, _| {
+            let evaluator = evaluator_for_get_json.clone();
+            Box::pin(async move {
+                let request = {
+                    let env = evaluator.env.lock().await;
+                    env.get("request").ok()
+                };
+
+                match request {
+                    Some(Value::Dict(req)) => Ok(req.get("json").cloned().unwrap_or(Value::None)),
+                    _ => Ok(Value::None),
+                }
+            })
+        })),
+    );
+
+    let evaluator_for_get_body = evaluator.clone();
+    env.set(
+        "get_body",
+        Value::Builtin(Arc::new(move |_args, _| {
+            let evaluator = evaluator_for_get_body.clone();
+            Box::pin(async move {
+                let request = {
+                    let env = evaluator.env.lock().await;
+                    env.get("request").ok()
+                };
+
+                match request {
+                    Some(Value::Dict(req)) => {
+                        Ok(req
+                            .get("form")
+                            .cloned()
+                            .unwrap_or(Value::Dict(IndexMap::new())))
+                    }
+                    _ => Ok(Value::Dict(IndexMap::new())),
+                }
+            })
+        })),
+    );
+
     // sleep(ms, value=None) -> Deferred
     // Non-blocking scheduler primitive:
     // - returns immediately with a Deferred
@@ -2880,6 +2923,31 @@ fn value_to_json(v: &Value) -> J {
         Value::None => J::Null,
         Value::Bytes(b) => J::String(format!("<bytes {}>", b.len())),
         other => J::String(other.repr()),
+    }
+}
+
+fn json_to_value(j: &J) -> Value {
+    match j {
+        J::Null => Value::None,
+        J::Bool(b) => Value::Bool(*b),
+        J::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float(f)
+            } else {
+                Value::Str(n.to_string())
+            }
+        }
+        J::String(s) => Value::Str(s.clone()),
+        J::Array(items) => Value::List(items.iter().map(json_to_value).collect()),
+        J::Object(obj) => {
+            let mut out = IndexMap::new();
+            for (k, v) in obj {
+                out.insert(k.clone(), json_to_value(v));
+            }
+            Value::Dict(out)
+        }
     }
 }
 
@@ -4136,6 +4204,13 @@ impl Evaluator {
             bound.insert(k, Value::Str(v));
         }
         if let Some(j) = json {
+            // JSON object keys are treated like body params for handler arg binding.
+            if let J::Object(obj) = &j {
+                for (k, v) in obj {
+                    bound.insert(k.clone(), json_to_value(v));
+                }
+            }
+
             // if handler has a Json param name, bind it (first param typed Json)
             let mut json_param_name = None;
             for p in &func.params {
@@ -4684,6 +4759,141 @@ mod tests {
             Value::Response(resp) => {
                 let text = String::from_utf8(resp.body).expect("response body should be utf-8");
                 assert_eq!(text, "from-form");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn web_handler_binds_json_object_keys_to_args() {
+        let src = r#"fn submit(name, age: int = 0)
+    return name + ":" + str(age)
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let mut query = HashMap::new();
+        query.insert("name".to_string(), "from-query".to_string());
+
+        let out = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "submit",
+                RequestParts {
+                    method: "POST".to_string(),
+                    path: "/".to_string(),
+                    path_params: HashMap::new(),
+                    query,
+                    json: Some(serde_json::json!({
+                        "name": "from-json",
+                        "age": 33
+                    })),
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let text = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(text, "from-json:33");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn web_handler_helpers_work_without_handler_args() {
+        let src = r#"fn from_json()
+    payload = get_json()
+    return str(payload["name"])
+
+fn from_form()
+    payload = get_body()
+    return payload["name"]
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let out_json = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "from_json",
+                RequestParts {
+                    method: "POST".to_string(),
+                    path: "/".to_string(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: Some(serde_json::json!({
+                        "name": "from-json-helper"
+                    })),
+                    form: HashMap::new(),
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("json helper handler should run");
+
+        match out_json {
+            Value::Response(resp) => {
+                let text = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(text, "from-json-helper");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+
+        let mut form = HashMap::new();
+        form.insert("name".to_string(), "from-form-helper".to_string());
+        let out_form = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "from_form",
+                RequestParts {
+                    method: "POST".to_string(),
+                    path: "/".to_string(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form,
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("form helper handler should run");
+
+        match out_form {
+            Value::Response(resp) => {
+                let text = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(text, "from-form-helper");
             }
             other => panic!("expected response, got {}", other.repr()),
         }
