@@ -106,12 +106,12 @@ app.static("/assets", "./public")
 
 @app.get("/")
 fn index()
-    return "Hello, {{ user }}"
+    return "Hello, Relay!"
 
 server.run(app)
 ```
 
-Visit `http://localhost:3000/` to see your JSON response.
+Visit `http://127.0.0.1:8080/` to see your response.
 
 
 
@@ -132,8 +132,8 @@ cd relay
 # Build and install
 cargo install --path .
 
-# Verify installation
-relay --version
+# Run a Relay program
+relay path/to/app.ry
 ```
 
 ### Development Mode
@@ -146,7 +146,7 @@ cargo run -- path/to/file.ry
 
 ### Environment Variables
 
-- `RELAY_BIND`: Override the default bind address for web servers (default: `127.0.0.1:3000`)
+- `RELAY_BIND`: Override the default bind address for web servers (default: `127.0.0.1:8080`)
 
 Example:
 ```bash
@@ -654,7 +654,7 @@ Create an HTTP client instance.
 http = Http()
 ```
 
-#### `http.get(url, headers=None)`
+#### `http.get(url)`
 **Returns:** `Deferred<Response>`
 
 Send a GET request.
@@ -666,13 +666,7 @@ print(resp.status)  // 200
 print(resp.text)    // Response body as string
 ```
 
-**With headers:**
-```relay
-headers = {"Authorization": "Bearer token123"}
-resp = http.get("https://api.example.com/protected", headers)
-```
-
-#### `http.post(url, data=None, headers=None)`
+#### `http.post(url, data=None)`
 **Returns:** `Deferred<Response>`
 
 Send a POST request with JSON body.
@@ -683,38 +677,6 @@ payload = {"name": "Ada", "email": "ada@example.com"}
 resp = http.post("https://api.example.com/users", payload)
 ```
 
-#### `http.put(url, data=None, headers=None)`
-**Returns:** `Deferred<Response>`
-
-Send a PUT request with JSON body.
-
-```relay
-http = Http()
-update = {"status": "active"}
-resp = http.put("https://api.example.com/users/123", update)
-```
-
-#### `http.patch(url, data=None, headers=None)`
-**Returns:** `Deferred<Response>`
-
-Send a PATCH request with JSON body.
-
-```relay
-http = Http()
-patch = {"email": "new@example.com"}
-resp = http.patch("https://api.example.com/users/123", patch)
-```
-
-#### `http.delete(url, headers=None)`
-**Returns:** `Deferred<Response>`
-
-Send a DELETE request.
-
-```relay
-http = Http()
-resp = http.delete("https://api.example.com/users/123")
-```
-
 #### Response Object
 
 HTTP responses have the following properties:
@@ -722,14 +684,12 @@ HTTP responses have the following properties:
 - `resp.status` - HTTP status code (int)
 - `resp.text` - Response body as string
 - `resp.json()` - Parse response body as JSON
-- `resp.headers` - Response headers (dict)
 
 ```relay
 http = Http()
 resp = http.get("https://api.github.com/users/octocat")
 
-print(resp.status)                    // 200
-print(resp.headers["content-type"])   // application/json
+print(resp.status)  // 200
 data = resp.json()
 print(data["login"])                  // octocat
 ```
@@ -802,7 +762,7 @@ fn get_comment(post_id, comment_id)
 
 Handler parameters are automatically bound from:
 1. **Path parameters** (highest priority)
-2. **Request body** (JSON)
+2. **Request body form fields** (`application/x-www-form-urlencoded`)
 3. **Query parameters** (lowest priority)
 
 ```relay
@@ -811,7 +771,7 @@ Handler parameters are automatically bound from:
 fn search(q: str, limit: int = 20)
     return {"query": q, "limit": limit}
 
-// POST /users with JSON body {"name": "Ada", "email": "ada@example.com"}
+// POST /users with form body: name=Ada&email=ada@example.com
 @app.post("/users")
 fn create_user(name: str, email: str)
     return {"name": name, "email": email}
@@ -820,6 +780,15 @@ fn create_user(name: str, email: str)
 @app.get("/users/<user_id>")
 fn get_user(user_id)
     return {"id": user_id}
+```
+
+JSON bodies are available as the `data` parameter (default name) or by typing a handler param as `Json`.
+
+```relay
+// POST /events with JSON body {"type":"signup","user":"ada"}
+@app.post("/events")
+fn create_event(data: Json)
+    return {"event_type": data["type"], "user": data["user"]}
 ```
 
 #### Type Hints in Handlers
@@ -831,7 +800,7 @@ Use type hints to enforce parameter types and enable automatic coercion:
 fn calculate(a: int, b: int)
     return {"result": a + b}
 
-// POST /calculate with {"a": "5", "b": "10"}
+// POST /calculate with form body a=5&b=10
 // Automatically converts strings to ints: {"result": 15}
 ```
 
@@ -851,6 +820,8 @@ fn debug_request()
     print(request["method"])    // GET
     print(request["path"])      // /debug
     print(request["query"])     // Query parameters dict
+    print(request["form"])      // Form fields dict (if present)
+    print(request["json"])      // JSON body (if present)
     print(request["headers"])   // Headers dict
     print(request["cookies"])   // Cookies dict
     return "OK"
@@ -860,6 +831,7 @@ fn debug_request()
 - `method` - HTTP method (string)
 - `path` - Request path (string)
 - `query` - Query parameters (dict)
+- `form` - Parsed form body fields (dict, when present)
 - `headers` - Request headers (dict)
 - `cookies` - Cookies (dict)
 - `json` - Parsed JSON body (if present)
@@ -1015,11 +987,11 @@ server = WebServer()
 fn index()
     return "Hello, World!"
 
-server.run(app)  // Starts server on 127.0.0.1:3000
+server.run(app)  // Starts server on 127.0.0.1:8080
 ```
 
 **Configuration:**
-- Default bind address: `127.0.0.1:3000`
+- Default bind address: `127.0.0.1:8080`
 - Override with `RELAY_BIND` environment variable:
   ```bash
   RELAY_BIND=0.0.0.0:8080 relay server.ry
@@ -1094,7 +1066,7 @@ docs = [
     {"name": "Grace", "email": "grace@example.com"}
 ]
 result = users.insert_many(docs)
-print(result["inserted_ids"])  // List of ObjectIds
+print(result["inserted_ids"])  // Dict of index -> ObjectId string
 ```
 
 #### `collection.find_one(filter)`
@@ -1243,25 +1215,41 @@ mongo = Mongo("mongodb://localhost:27017")
 db = mongo.db("pastebin")
 pastes = db.collection("pastes")
 
+fn find_paste(paste_id)
+    return pastes.find_one({"_id": paste_id})
+
 @app.get("/")
 fn index()
     return read_file("static/index.html")
 
 @app.post("/")
-fn create_paste(content: str)
+fn create_paste(content = None)
+    if (content == None)
+        return Response("Missing content", status=400)
     result = pastes.insert_one({"content": content})
     paste_id = str(result["inserted_id"])
     return app.redirect("/" + paste_id)
 
 @app.get("/<paste_id>")
 fn view_paste(paste_id)
-    paste = pastes.find_one({"_id": paste_id})
+    paste = find_paste(paste_id)
     if (paste == None)
         return Response("Not found", status=404)
-    return paste["content"]
+    return read_file("static/paste.html")
+
+@app.get("/api/paste/<paste_id>")
+fn get_paste(paste_id)
+    paste = find_paste(paste_id)
+    if (paste == None)
+        return Response("Not found", status=404)
+    return {"id": paste_id, "content": "{{ paste[\"content\"] }}"}
 
 server.run(app)
 ```
+
+Template files used by this example:
+- `static/index.html` for paste creation form
+- `static/paste.html` for `<pre><code>` viewer UI and syntax highlighting
 
 ### 4. Concurrent HTTP Requests
 
@@ -1857,18 +1845,18 @@ Contributions are welcome! Here's how to get started:
 ### Development Setup
 
 ```bash
-// Clone the repo
+# Clone the repo
 git clone https://github.com/yourusername/relay.git
 cd relay
 
-// Build in debug mode
+# Build in debug mode
 cargo build
 
-// Run tests
+# Run tests
 cargo test
 
-// Run with examples
-cargo run -- examples/hello.ry
+# Run the sample app
+cargo run -- test.ry
 ```
 
 ### Adding Features
@@ -1876,7 +1864,7 @@ cargo run -- examples/hello.ry
 1. **Lexer changes:** Modify the `Lexer` struct and `tokenize()` method
 2. **Parser changes:** Update the `Parser` struct and AST types
 3. **Runtime changes:** Modify the `Evaluator` and `install_stdlib()` function
-4. **Testing:** Add example programs to `examples/`
+4. **Testing:** Add runnable `.ry` scripts and corresponding docs snippets
 
 ### Coding Standards
 
@@ -1914,6 +1902,12 @@ Found a bug? [Open an issue](https://github.com/patx/relay-lang/issues) with:
 - [ ] Web framework improvements (routing groups, validation)
 - [ ] Worker processes for CPU-heavy tasks
 
+**Known Gaps (Identified in v0.1):**
+- [ ] JSON request key binding to scalar handler args (e.g. bind `{"name":"Ada"}` directly to `fn create(name)`).
+- [ ] HTTP client parity for `put`, `patch`, `delete`, request headers, and response header access.
+- [ ] First-class CLI flags (`--help`, `--version`) for better install verification and discoverability.
+- [ ] Built-in HTML escaping helper for safely rendering user content directly in server-side templates.
+
 
 ## License
 
@@ -1943,6 +1937,6 @@ SOFTWARE.
 ## Support
 
 - **Documentation:** This README
-- **Examples:** See `examples/` directory
+- **Reference app:** `test.ry` with templates under `static/`
 - **Issues:** [GitHub Issues](https://github.com/patx/relay-lang/issues)
 - **Discussions:** [GitHub Discussions](https://github.com/patx/relay-lang/discussions)

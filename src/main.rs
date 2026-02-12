@@ -21,12 +21,13 @@ use std::{
 };
 
 use axum::{
+    body::Bytes,
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     extract::{Path, Query},
     http::{HeaderMap, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Json as AxumJson, Router,
+    Router,
 };
 
 use async_recursion::async_recursion;
@@ -34,7 +35,7 @@ use futures::{stream::TryStreamExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
 use minijinja::Environment;
 use mongodb::{
-    bson::{self, Bson, Document},
+    bson::{self, oid::ObjectId, Bson, Document},
     Client as MongoClient, Collection as MongoCollection, Database as MongoDatabase,
 };
 use serde_json::Value as J;
@@ -2468,9 +2469,11 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
         "str",
         Value::Builtin(Arc::new(|args, _| {
             Box::pin(async move {
-                Ok(Value::Str(
-                    args.get(0).cloned().unwrap_or(Value::None).repr(),
-                ))
+                let out = match args.get(0).cloned().unwrap_or(Value::None) {
+                    Value::Json(J::String(s)) => s,
+                    other => other.repr(),
+                };
+                Ok(Value::Str(out))
             })
         })),
     );
@@ -2892,8 +2895,58 @@ fn value_to_document(v: Value, sig: &str) -> RResult<Document> {
     }
 }
 
+fn value_to_filter_document(v: Value, sig: &str) -> RResult<Document> {
+    let mut doc = value_to_document(v, sig)?;
+    for (k, v) in doc.iter_mut() {
+        coerce_object_id_strings(v, k == "_id");
+    }
+    Ok(doc)
+}
+
+fn coerce_object_id_strings(value: &mut Bson, id_context: bool) {
+    match value {
+        Bson::String(s) if id_context => {
+            if let Ok(oid) = ObjectId::parse_str(s.as_str()) {
+                *value = Bson::ObjectId(oid);
+            }
+        }
+        Bson::Document(doc) => {
+            for (k, v) in doc.iter_mut() {
+                coerce_object_id_strings(v, id_context || k == "_id");
+            }
+        }
+        Bson::Array(items) => {
+            for item in items.iter_mut() {
+                coerce_object_id_strings(item, id_context);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn bson_to_json(bson: Bson) -> RResult<J> {
-    serde_json::to_value(bson).map_err(|e| RelayError::Runtime(e.to_string()))
+    fn convert(bson: Bson) -> RResult<J> {
+        match bson {
+            Bson::ObjectId(oid) => Ok(J::String(oid.to_hex())),
+            Bson::Document(doc) => {
+                let mut out = serde_json::Map::new();
+                for (k, v) in doc {
+                    out.insert(k, convert(v)?);
+                }
+                Ok(J::Object(out))
+            }
+            Bson::Array(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(convert(item)?);
+                }
+                Ok(J::Array(out))
+            }
+            other => serde_json::to_value(other).map_err(|e| RelayError::Runtime(e.to_string())),
+        }
+    }
+
+    convert(bson)
 }
 
 // ========================= Web runtime (Axum) =========================
@@ -3000,6 +3053,7 @@ struct RequestParts {
     path_params: HashMap<String, String>,
     query: HashMap<String, String>,
     json: Option<J>,
+    form: HashMap<String, String>,
     headers: HashMap<String, String>,
     cookies: HashMap<String, String>,
     session_id: Option<String>,
@@ -3105,7 +3159,7 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                             Path(ax_path): Path<HashMap<String, String>>,
                             Query(q): Query<HashMap<String, String>>,
                             headers: HeaderMap,
-                            body: Option<AxumJson<J>>| {
+                            body: Bytes| {
             let fn_name = http_fn_name.clone();
             let route_path = http_route_path.clone();
             let app_handle = http_app_handle.clone();
@@ -3118,13 +3172,15 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                 }
                 let cookies = parse_cookie_header(h.get("cookie").cloned());
                 let session_id = cookies.get("relay_sid").cloned();
+                let (json_body, form_body) = parse_request_body(&headers, &body);
 
                 let req = RequestParts {
                     method: method.to_string(),
                     path: route_path,
                     path_params: ax_path,
                     query: q,
-                    json: body.map(|b| b.0),
+                    json: json_body,
+                    form: form_body,
                     headers: h,
                     cookies,
                     session_id,
@@ -3178,6 +3234,7 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                         path_params: ax_path,
                         query: q,
                         json: None,
+                        form: HashMap::new(),
                         headers: h,
                         cookies,
                         session_id,
@@ -3219,6 +3276,32 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
         .await
         .map_err(|e| RelayError::Runtime(e.to_string()))?;
     Ok(())
+}
+
+fn parse_request_body(headers: &HeaderMap, body: &[u8]) -> (Option<J>, HashMap<String, String>) {
+    if body.is_empty() {
+        return (None, HashMap::new());
+    }
+
+    let ct = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if ct.contains("application/json") {
+        let json = serde_json::from_slice::<J>(body).ok();
+        return (json, HashMap::new());
+    }
+
+    if ct.contains("application/x-www-form-urlencoded") {
+        let form = url::form_urlencoded::parse(body)
+            .into_owned()
+            .collect::<HashMap<String, String>>();
+        return (None, form);
+    }
+
+    (None, HashMap::new())
 }
 
 fn parse_cookie_header(raw: Option<String>) -> HashMap<String, String> {
@@ -3692,7 +3775,7 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let filter = value_to_document(
+                        let filter = value_to_filter_document(
                             args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())),
                             "collection.find_one(filter)",
                         )?;
@@ -3715,7 +3798,7 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let filter = value_to_document(
+                        let filter = value_to_filter_document(
                             args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())),
                             "collection.find(filter)",
                         )?;
@@ -3748,7 +3831,7 @@ impl MongoCollectionHandle {
                                 "collection.update_one(filter, update)".into(),
                             ));
                         }
-                        let filter = value_to_document(
+                        let filter = value_to_filter_document(
                             args[0].clone(),
                             "collection.update_one(filter, update)",
                         )?;
@@ -3784,7 +3867,7 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let filter = value_to_document(
+                        let filter = value_to_filter_document(
                             args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())),
                             "collection.delete_one(filter)",
                         )?;
@@ -3804,7 +3887,7 @@ impl MongoCollectionHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let collection = collection.clone();
                     Box::pin(async move {
-                        let filter = value_to_document(
+                        let filter = value_to_filter_document(
                             args.get(0).cloned().unwrap_or(Value::Dict(IndexMap::new())),
                             "collection.delete_many(filter)",
                         )?;
@@ -4026,6 +4109,7 @@ impl Evaluator {
             path_params,
             query,
             json,
+            form,
             headers,
             cookies,
             session_id,
@@ -4034,6 +4118,7 @@ impl Evaluator {
 
         let query_map = query.clone();
         let json_body = json.clone();
+        let form_body = form.clone();
 
         // build arg map by param list
         let mut bound: HashMap<String, Value> = HashMap::new();
@@ -4047,6 +4132,9 @@ impl Evaluator {
             bound.insert(k, Value::Str(v));
         }
         // then Body
+        for (k, v) in form {
+            bound.insert(k, Value::Str(v));
+        }
         if let Some(j) = json {
             // if handler has a Json param name, bind it (first param typed Json)
             let mut json_param_name = None;
@@ -4123,6 +4211,15 @@ impl Evaluator {
         if let Some(j) = json_body {
             req_dict.insert("json".into(), Value::Json(j));
         }
+        req_dict.insert(
+            "form".into(),
+            Value::Dict(
+                form_body
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
+                    .collect(),
+            ),
+        );
 
         let existing_session = session_id
             .as_ref()
@@ -4468,6 +4565,128 @@ mod tests {
             err,
             RelayError::Syntax { msg, .. } if msg.contains("without matching if")
         ));
+    }
+
+    #[test]
+    fn bson_object_id_is_exposed_as_plain_string() {
+        let oid = ObjectId::parse_str("698d35e0ef97187ab267d11e").expect("valid object id");
+        let json = bson_to_json(Bson::ObjectId(oid)).expect("conversion should succeed");
+        assert_eq!(json, J::String("698d35e0ef97187ab267d11e".to_string()));
+    }
+
+    #[test]
+    fn filter_document_coerces_id_strings_to_object_ids() {
+        let oid = "698d35e0ef97187ab267d11e";
+        let filter = Value::Json(serde_json::json!({
+            "_id": { "$in": [oid] },
+            "$or": [{ "_id": oid }]
+        }));
+
+        let doc =
+            value_to_filter_document(filter, "collection.find_one(filter)").expect("valid filter");
+
+        let top_id = doc
+            .get_document("_id")
+            .expect("top-level _id document")
+            .get_array("$in")
+            .expect("$in array")
+            .first()
+            .expect("first $in value");
+        assert!(matches!(top_id, Bson::ObjectId(_)));
+
+        let nested_id = doc
+            .get_array("$or")
+            .expect("$or array")
+            .first()
+            .expect("first $or clause")
+            .as_document()
+            .expect("$or clause should be a document")
+            .get("_id")
+            .expect("nested _id");
+        assert!(matches!(nested_id, Bson::ObjectId(_)));
+    }
+
+    #[test]
+    fn value_to_document_accepts_oid_extended_json() {
+        let input = Value::Json(serde_json::json!({
+            "_id": { "$oid": "698d35e0ef97187ab267d11e" }
+        }));
+
+        let doc = value_to_document(input, "test").expect("document should parse");
+        let id = doc.get("_id").expect("_id should exist");
+        assert!(
+            matches!(id, Bson::ObjectId(_)),
+            "value_to_document should coerce $oid extended JSON"
+        );
+    }
+
+    #[test]
+    fn parses_urlencoded_form_request_body() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+
+        let (json, form) = parse_request_body(&headers, b"content=hello+world&tag=notes");
+        assert!(json.is_none());
+        assert_eq!(
+            form.get("content"),
+            Some(&"hello world".to_string()),
+            "content should be URL-decoded"
+        );
+        assert_eq!(form.get("tag"), Some(&"notes".to_string()));
+    }
+
+    #[tokio::test]
+    async fn web_handler_prefers_form_body_over_query() {
+        let src = r#"fn submit(content)
+    return content
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let mut query = HashMap::new();
+        query.insert("content".to_string(), "from-query".to_string());
+        let mut form = HashMap::new();
+        form.insert("content".to_string(), "from-form".to_string());
+
+        let out = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "submit",
+                RequestParts {
+                    method: "POST".to_string(),
+                    path: "/".to_string(),
+                    path_params: HashMap::new(),
+                    query,
+                    json: None,
+                    form,
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let text = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(text, "from-form");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
     }
 
     #[tokio::test]

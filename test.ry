@@ -1,19 +1,40 @@
 app = WebApp()
 server = WebServer()
+mongo = Mongo("mongodb://localhost:27017")
+db = mongo.db("pastebin")
+pastes = db.collection("pastes")
 
-@app.get("/login")
-fn login(user: str = "guest")
-    session["user"] = user
-    return app.redirect("/u/" + user)
+fn find_paste(paste_id)
+    return pastes.find_one({"_id": paste_id})
 
-fn auth()
-    if (request.path == "/u/<user>" && session["user"] == None)
-        return app.redirect("/login")
+@app.get("/")
+fn index()
+    return read_file("static/index.html")
 
-app.use(auth)
+@app.post("/")
+fn create_paste(content = None)
+    if (content == None)
+        return Response("Missing content", status=400)
 
-@app.get("/u/<user>")
-fn index(user: str)
-    return "Hello, {{ user }}"
+    result = pastes.insert_one({"content": content})
+    paste_id = str(result["inserted_id"])
+    return app.redirect("/" + paste_id)
+
+@app.get("/<paste_id>")
+fn view_paste(paste_id)
+    paste = find_paste(paste_id)
+    if (paste == None)
+        return Response("Not found", status=404)
+    return read_file("static/paste.html")
+
+@app.get("/api/paste/<paste_id>")
+fn get_paste(paste_id)
+    paste = find_paste(paste_id)
+    if (paste == None)
+        return Response("Not found", status=404)
+    content = paste["content"]
+    if (content == None)
+        return Response("Not found", status=404)
+    return {"id": paste_id, "content": "{{ content }}"}
 
 server.run(app)

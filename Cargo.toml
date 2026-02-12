@@ -19,3 +19,4 @@ async-recursion = "1"
 mongodb = { version = "2.8", features = ["tokio-runtime"] }
 futures = "0.3"
 minijinja = "2"
+url = "2"

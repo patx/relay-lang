@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relay Pastebin</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f8f8f8;
+      color: #111;
+    }
+    main {
+      max-width: 780px;
+      margin: 40px auto;
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      padding: 20px;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.5rem;
+    }
+    textarea {
+      width: 100%;
+      min-height: 300px;
+      box-sizing: border-box;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 14px;
+      padding: 12px;
+      border: 1px solid #bbb;
+      border-radius: 8px;
+      resize: vertical;
+    }
+    button {
+      margin-top: 12px;
+      padding: 10px 16px;
+      border: 1px solid #222;
+      border-radius: 8px;
+      background: #222;
+      color: #fff;
+      cursor: pointer;
+    }
+    p {
+      color: #555;
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Create a Paste</h1>
+    <p>Submit text and you will be redirected to a unique URL.</p>
+    <form method="post" action="/">
+      <textarea name="content" placeholder="Paste content..." required></textarea>
+      <br>
+      <button type="submit">Save Paste</button>
+    </form>
+  </main>
+</body>
+</html>
