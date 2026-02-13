@@ -9,7 +9,7 @@ fn find_paste(paste_id)
 
 @app.get("/")
 fn index()
-    return read_file("static/index.html")
+    return read_file("examples/static/index.html")
 
 @app.post("/")
 fn create_paste(content = None)
@@ -25,7 +25,7 @@ fn view_paste(paste_id)
     paste = find_paste(paste_id)
     if (paste == None)
         return Response("Not found", status=404)
-    return read_file("static/paste.html")
+    return read_file("examples/static/paste.html")
 
 @app.get("/api/paste/<paste_id>")
 fn get_paste(paste_id)

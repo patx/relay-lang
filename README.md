@@ -13,7 +13,9 @@ Relay is designed for building high-performance web services, APIs, and network 
 
 - [Features](#features)
 - [Quick Start](#quick-start)
+- [Example Prereqs](#example-prereqs)
 - [Installation](#installation)
+- [Learning Path](#learning-path)
 - [Language Guide](#language-guide)
   - [Syntax Fundamentals](#syntax-fundamentals)
   - [Data Types](#data-types)
@@ -69,8 +71,8 @@ Relay is designed for building high-performance web services, APIs, and network 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/relay.git
-cd relay
+git clone https://github.com/patx/relay-lang.git
+cd relay-lang
 
 # Install the Relay CLI
 cargo install --path .
@@ -78,6 +80,29 @@ cargo install --path .
 # Run a Relay program
 relay path/to/app.ry
 ```
+
+### Run Included Examples
+
+```bash
+# Small language/runtime example
+relay examples/type_hint_validation.ry
+
+# Full web app examples
+relay examples/param_types.ry
+relay examples/pastebin.ry          # requires local MongoDB
+relay examples/url_shortener.ry     # requires local MongoDB
+```
+
+### Example Prereqs
+
+| Example | Needs |
+|---|---|
+| `examples/type_hint_validation.ry` | None |
+| `examples/param_types.ry` | None |
+| `examples/pastebin.ry` | Local MongoDB at `mongodb://localhost:27017` |
+| `examples/url_shortener.ry` | Local MongoDB at `mongodb://localhost:27017` |
+| `examples/upload_email_attachment.ry` | SMTP credentials + template files in `examples/templates/` |
+| `examples/email_smtp.ry` | SMTP credentials |
 
 ### Hello World
 
@@ -135,8 +160,8 @@ Visit `http://127.0.0.1:8080/` to see your response.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/relay.git
-cd relay
+git clone https://github.com/patx/relay-lang.git
+cd relay-lang
 
 # Build and install
 cargo install --path .
@@ -162,6 +187,17 @@ Example:
 RELAY_BIND=0.0.0.0:8080 relay server.ry
 ```
 
+
+
+## Learning Path
+
+If your goal is to learn Relay end-to-end, use this order:
+
+1. Start with [Quick Start](#quick-start) to run your first script and web app.
+2. Work through [Language Guide](#language-guide) for syntax, types, control flow, modules, and async behavior.
+3. Use [API Reference](#api-reference) as the complete built-in/runtime reference.
+4. Run scripts in [`examples/`](examples/) to see complete services and integrations.
+5. Revisit [Best Practices](#best-practices) and [Troubleshooting](#troubleshooting) as you build real apps.
 
 
 ## Language Guide
@@ -1551,7 +1587,7 @@ fn find_paste(paste_id)
 
 @app.get("/")
 fn index()
-    return read_file("static/index.html")
+    return read_file("examples/static/index.html")
 
 @app.post("/")
 fn create_paste(content = None)
@@ -1566,7 +1602,7 @@ fn view_paste(paste_id)
     paste = find_paste(paste_id)
     if (paste == None)
         return Response("Not found", status=404)
-    return read_file("static/paste.html")
+    return read_file("examples/static/paste.html")
 
 @app.get("/api/paste/<paste_id>")
 fn get_paste(paste_id)
@@ -1579,8 +1615,8 @@ server.run(app)
 ```
 
 Template files used by this example:
-- `static/index.html` for paste creation form
-- `static/paste.html` for `<pre><code>` viewer UI and syntax highlighting
+- `examples/static/index.html` for paste creation form
+- `examples/static/paste.html` for `<pre><code>` viewer UI and syntax highlighting
 
 ### 4. Concurrent HTTP Requests
 
@@ -2206,8 +2242,8 @@ Contributions are welcome! Here's how to get started:
 
 ```bash
 # Clone the repo
-git clone https://github.com/yourusername/relay.git
-cd relay
+git clone https://github.com/patx/relay-lang.git
+cd relay-lang
 
 # Build in debug mode
 cargo build
@@ -2216,7 +2252,7 @@ cargo build
 cargo test
 
 # Run the sample app
-cargo run -- test.ry
+cargo run -- examples/type_hint_validation.ry
 ```
 
 ### Adding Features
@@ -2297,6 +2333,6 @@ SOFTWARE.
 ## Support
 
 - **Documentation:** This README
-- **Reference app:** `test.ry` with templates under `static/`
+- **Examples:** `examples/` (start with `examples/type_hint_validation.ry` and `examples/pastebin.ry`)
 - **Issues:** [GitHub Issues](https://github.com/patx/relay-lang/issues)
 - **Discussions:** [GitHub Discussions](https://github.com/patx/relay-lang/discussions)
