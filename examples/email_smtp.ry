@@ -1,0 +1,22 @@
+email = Email(
+    host="smtp.example.com",
+    username="smtp-user",
+    password="smtp-pass",
+    from="Relay <noreply@example.com>"
+)
+
+fn send_welcome(name, to)
+    html = email.render(
+        "<h1>Welcome {{ name }}</h1><p>Your account is ready.</p>",
+        {"name": name}
+    )
+
+    return email.send(
+        to=to,
+        subject="Welcome to Relay",
+        text="Welcome " + name + "!",
+        html=html
+    )
+
+result = send_welcome("Ada", "ada@example.com")
+print("SMTP send result:", result)

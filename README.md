@@ -25,6 +25,7 @@ Relay is designed for building high-performance web services, APIs, and network 
   - [Async & Concurrency](#async--concurrency)
   - [File System](#file-system)
   - [HTTP Client](#http-client)
+  - [Email (SMTP)](#email-smtp)
   - [Web Server](#web-server)
   - [Database (MongoDB)](#database-mongodb)
 - [Examples](#examples)
@@ -44,6 +45,9 @@ Relay is designed for building high-performance web services, APIs, and network 
 - **Static File Serving**: Mount directories directly in your web app (`app.static("/assets", "./public")`)
 - **Middleware Hooks**: Run request middleware before handlers (`app.use(auth_middleware)`)
 - **HTTP Client**: Async HTTP client with `get/post/put/patch/delete` and request/response headers
+- **Email (SMTP)**: Async SMTP mail sending with secure-by-default TLS and template helpers
+- **Multipart Uploads**: Parse `multipart/form-data` bodies with file metadata/bytes
+- **Upload Guards**: Configure max request/file size limits and MIME allowlists via `app.uploads(...)`
 - **MongoDB Integration**: Native async MongoDB support
 - **Session Management**: Built-in session handling with HttpOnly cookies
 - **Pluggable Session Backends**: Use in-memory sessions or custom load/save callbacks
@@ -713,6 +717,102 @@ data = resp.json()
 print(data["login"])                  // octocat
 ```
 
+### Email (SMTP)
+
+#### `Email(host, port=587, username=None, password=None, from=None, tls="starttls")`
+Create an SMTP email client instance.
+
+```relay
+email = Email(
+    "smtp.example.com",
+    587,
+    "smtp-user",
+    "smtp-pass",
+    "Relay <noreply@example.com>",
+    tls="starttls"
+)
+```
+
+TLS modes:
+- `"starttls"` (default) - requires STARTTLS upgrade
+- `"wrapper"` - implicit TLS/SMTPS (commonly port 465)
+- `"insecure"` - plain SMTP (only for local/dev)
+
+#### `email.send(to, subject, text=None, html=None, cc=None, bcc=None, reply_to=None, from=None, headers=None, attachments=None)`
+**Returns:** `Deferred<dict>`
+
+Send an email asynchronously over SMTP.
+
+- `to`, `cc`, `bcc` accept `str` or `list[str]`
+- at least one of `text` or `html` is required
+- `from` can be passed per-call or configured in `Email(...)`
+- `attachments` accepts a single attachment dict or list of attachment dicts
+
+```relay
+email = Email(
+    host="smtp.example.com",
+    username="smtp-user",
+    password="smtp-pass",
+    from="Relay <noreply@example.com>"
+)
+
+result = email.send(
+    to=["ada@example.com"],
+    subject="Welcome",
+    text="Welcome to Relay!"
+)
+
+print(result["ok"])          // True
+print(result["smtp_code"])   // e.g. 250
+```
+
+Attachment dict format:
+- `filename` (required) - attachment file name
+- `bytes` or `content` or `data` (required) - file payload (`bytes`, `str`, or `list[int]`)
+- `content_type` (optional) - MIME type (default: `application/octet-stream`)
+
+```relay
+result = email.send(
+    to="ada@example.com",
+    subject="Monthly report",
+    text="See attached report.",
+    attachments=[
+        {
+            "filename": "report.txt",
+            "content_type": "text/plain",
+            "bytes": "Report body"
+        }
+    ]
+)
+```
+
+Send result fields:
+- `ok` - always `True` on success
+- `transport` - `"smtp"`
+- `host` / `port` - resolved transport target
+- `message_id` - message id when available, else `None`
+- `envelope_to` - recipient list used for SMTP envelope
+- `smtp_code` / `smtp_message` - provider response details when available
+
+#### `email.render(template, data=None)`
+**Returns:** `string`
+
+Render an email template string with MiniJinja variables.
+
+```relay
+body = email.render("Hi {{ name }}, welcome!", {"name": "Ada"})
+```
+
+#### `email.render_file(path, data=None)`
+**Returns:** `Deferred<string>`
+
+Load and render a template file asynchronously.
+
+```relay
+html = email.render_file("templates/welcome.html", {"name": "Ada"})
+email.send(to="ada@example.com", subject="Welcome", html=html)
+```
+
 ### Web Server
 
 #### `WebApp()`
@@ -914,6 +1014,13 @@ fn debug_request()
 - `request_id` - Request identifier string
 - `query` - Query parameters (dict)
 - `form` - Parsed form body fields (dict, when present)
+  - URL-encoded fields become strings
+  - Multipart text fields become strings
+  - Multipart file fields become dicts:
+    - `filename` (`str` or `None`)
+    - `content_type` (`str` or `None`)
+    - `size` (`int`)
+    - `bytes` (`bytes`)
 - `headers` - Request headers (dict)
 - `cookies` - Cookies (dict)
 - `json` - Parsed JSON body (if present)
@@ -1015,6 +1122,25 @@ fn save_session(sid, data)
 
 app.session_backend(load_session, save_session)
 ```
+
+#### Upload Limits and MIME Allowlist
+
+Configure upload safety controls per app:
+
+```relay
+app.uploads(
+    max_body_bytes=10 * 1024 * 1024,   // default 10 MiB
+    max_file_bytes=5 * 1024 * 1024,    // default 5 MiB per file field
+    allowed_mime_types=["image/png", "application/pdf"]  // optional
+)
+```
+
+Parameters:
+- `max_body_bytes` - Maximum raw request body size accepted
+- `max_file_bytes` - Maximum size for each multipart file field
+- `allowed_mime_types` - Optional MIME allowlist for multipart file fields (`None` disables allowlist)
+
+When limits are exceeded or a MIME type is disallowed, Relay returns `400 bad_request`.
 
 #### Response Types
 
@@ -1166,6 +1292,13 @@ fn index()
 ```
 
 Templates can reference values in the current scope and support MiniJinja expressions/filters.
+
+Use `app.render_template(...)` when you want explicit template rendering without relying on implicit `{{ ... }}` string evaluation:
+
+```relay
+app = WebApp()
+html = app.render_template("<h1>Hello {{ name }}</h1>", {"name": "Ada"})
+```
 
 #### `WebServer()`
 Create a web server instance.
@@ -1625,6 +1758,32 @@ print("All tasks started, continuing...")
 // Tasks run in background
 ```
 
+### 11. SMTP Welcome Email with Templates
+
+```relay
+email = Email(
+    host="smtp.example.com",
+    username="smtp-user",
+    password="smtp-pass",
+    from="Relay <noreply@example.com>"
+)
+
+fn send_welcome(name, to)
+    html = email.render(
+        "<h1>Welcome {{ name }}</h1><p>Thanks for joining Relay.</p>",
+        {"name": name}
+    )
+    return email.send(
+        to=to,
+        subject="Welcome to Relay",
+        text="Welcome " + name + "!",
+        html=html
+    )
+
+result = send_welcome("Ada", "ada@example.com")
+print("Email queued:", result["ok"])
+```
+
 
 
 ## How It Works
@@ -1635,6 +1794,7 @@ Relay is built on:
 - **Rust**: The interpreter is written in Rust for performance and safety
 - **Tokio**: Async runtime for non-blocking I/O
 - **Axum**: High-performance web framework for the built-in server
+- **Lettre**: Async SMTP transport for built-in email delivery
 - **MongoDB driver**: Native async MongoDB support
 
 ### Compilation Pipeline

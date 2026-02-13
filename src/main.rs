@@ -37,6 +37,14 @@ use argon2::{
 };
 use futures::{stream::TryStreamExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
+use lettre::{
+    message::{
+        header as mail_header, Attachment as MailAttachment, Mailbox, Message as MailMessage,
+        MultiPart, SinglePart,
+    },
+    transport::smtp::authentication::Credentials,
+    AsyncSmtpTransport, AsyncTransport, Tokio1Executor,
+};
 use minijinja::Environment;
 use mongodb::{
     bson::{self, oid::ObjectId, Bson, Document},
@@ -1373,6 +1381,7 @@ enum Object {
     WebServer(WebServerHandle),
     Http(HttpHandle),
     HttpResponse(HttpResponseHandle),
+    Email(EmailHandle),
     AuthStore(AuthStoreHandle),
     MongoClient(MongoClientHandle),
     MongoDatabase(MongoDatabaseHandle),
@@ -2056,6 +2065,10 @@ impl Evaluator {
                 let is_spawn_ident = matches!(&**callee, Expr::Ident(name) if name == "spawn");
                 let is_sleep_ident = matches!(&**callee, Expr::Ident(name) if name == "sleep");
                 let is_print_ident = matches!(&**callee, Expr::Ident(name) if name == "print");
+                let is_explicit_template_method = matches!(
+                    &**callee,
+                    Expr::Member { name, .. } if name == "render_template" || name == "render"
+                );
 
                 let c = self
                     .resolve_deferred_only(self.eval_expr(callee).await?)
@@ -2070,7 +2083,14 @@ impl Evaluator {
                         a.push(Value::Thunk(Arc::new(Thunk::new(x.clone(), env))));
                         continue;
                     }
-                    let v = self.eval_expr(x).await?;
+                    let v = if is_explicit_template_method && idx == 0 {
+                        match x {
+                            Expr::Str(s) => Value::Str(s.clone()),
+                            _ => self.eval_expr(x).await?,
+                        }
+                    } else {
+                        self.eval_expr(x).await?
+                    };
                     let v = if is_spawn_ident {
                         v
                     } else {
@@ -2082,7 +2102,14 @@ impl Evaluator {
                 // kwargs
                 let mut kw = Vec::new();
                 for (k, x) in kwargs {
-                    let v = self.eval_expr(x).await?;
+                    let v = if is_explicit_template_method && k == "template" {
+                        match x {
+                            Expr::Str(s) => Value::Str(s.clone()),
+                            _ => self.eval_expr(x).await?,
+                        }
+                    } else {
+                        self.eval_expr(x).await?
+                    };
                     let v = if is_spawn_ident {
                         v
                     } else {
@@ -3322,6 +3349,15 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
             Box::pin(async move { Ok(Value::Obj(Object::Http(HttpHandle::new()))) })
         })),
     );
+    env.set(
+        "Email",
+        Value::Builtin(Arc::new(|args, kwargs| {
+            Box::pin(async move {
+                let handle = EmailHandle::from_constructor_args(&args, &kwargs)?;
+                Ok(Value::Obj(Object::Email(handle)))
+            })
+        })),
+    );
 
     env.set(
         "auth_hash_password",
@@ -3437,6 +3473,122 @@ fn expect_int(args: &[Value], i: usize, sig: &str) -> RResult<i64> {
             .parse()
             .map_err(|_| RelayError::Type(format!("{sig} expects int"))),
         _ => Err(RelayError::Type(format!("{sig} expects int"))),
+    }
+}
+
+fn kwarg_or_arg(kwargs: &[(String, Value)], args: &[Value], name: &str, index: usize) -> Option<Value> {
+    kwargs
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.clone())
+        .or_else(|| args.get(index).cloned())
+}
+
+fn expect_str_value(v: Value, sig: &str, field: &str) -> RResult<String> {
+    match v {
+        Value::Str(s) => Ok(s),
+        Value::Json(J::String(s)) => Ok(s),
+        _ => Err(RelayError::Type(format!("{sig} {field} must be str"))),
+    }
+}
+
+fn parse_optional_str_value(v: Option<Value>, sig: &str, field: &str) -> RResult<Option<String>> {
+    match v {
+        None | Some(Value::None) => Ok(None),
+        Some(other) => Ok(Some(expect_str_value(other, sig, field)?)),
+    }
+}
+
+fn parse_u16_value(v: Value, sig: &str, field: &str) -> RResult<u16> {
+    let n = match v {
+        Value::Int(i) => i,
+        Value::Float(f) => f as i64,
+        Value::Str(s) => s
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| RelayError::Type(format!("{sig} {field} must be int")))?,
+        _ => return Err(RelayError::Type(format!("{sig} {field} must be int"))),
+    };
+    if !(0..=65535).contains(&n) {
+        return Err(RelayError::Type(format!("{sig} {field} must be in range 0..65535")));
+    }
+    Ok(n as u16)
+}
+
+fn parse_usize_value(v: Value, sig: &str, field: &str) -> RResult<usize> {
+    let n = match v {
+        Value::Int(i) => i,
+        Value::Float(f) => f as i64,
+        Value::Str(s) => s
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| RelayError::Type(format!("{sig} {field} must be int")))?,
+        _ => return Err(RelayError::Type(format!("{sig} {field} must be int"))),
+    };
+    if n <= 0 {
+        return Err(RelayError::Type(format!(
+            "{sig} {field} must be a positive integer"
+        )));
+    }
+    Ok(n as usize)
+}
+
+fn parse_optional_mime_allowlist(
+    v: Option<Value>,
+    sig: &str,
+    field: &str,
+) -> RResult<Option<HashSet<String>>> {
+    let Some(value) = v else {
+        return Ok(None);
+    };
+    match value {
+        Value::None => Ok(None),
+        Value::Str(s) => {
+            let mime = s.trim().to_ascii_lowercase();
+            if mime.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(HashSet::from([mime])))
+        }
+        Value::List(items) => {
+            let mut set = HashSet::new();
+            for item in items {
+                let mime = expect_str_value(item, sig, field)?
+                    .trim()
+                    .to_ascii_lowercase();
+                if !mime.is_empty() {
+                    set.insert(mime);
+                }
+            }
+            if set.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(set))
+            }
+        }
+        Value::Json(J::Array(items)) => {
+            parse_optional_mime_allowlist(Some(Value::List(items.iter().map(json_to_value).collect())), sig, field)
+        }
+        _ => Err(RelayError::Type(format!(
+            "{sig} {field} must be str or list[str]"
+        ))),
+    }
+}
+
+fn parse_string_list_value(v: Value, sig: &str, field: &str) -> RResult<Vec<String>> {
+    match v {
+        Value::None => Ok(vec![]),
+        Value::Str(s) => Ok(vec![s]),
+        Value::Json(J::String(s)) => Ok(vec![s]),
+        Value::List(items) => items
+            .into_iter()
+            .map(|item| expect_str_value(item, sig, field))
+            .collect(),
+        Value::Json(J::Array(items)) => items
+            .iter()
+            .map(|item| expect_str_value(json_to_value(item), sig, field))
+            .collect(),
+        _ => Err(RelayError::Type(format!("{sig} {field} must be str or list[str]"))),
     }
 }
 
@@ -3664,6 +3816,7 @@ struct AppState {
     static_mounts: Vec<StaticMount>,
     sessions: HashMap<String, IndexMap<String, Value>>,
     session_config: SessionConfig,
+    upload_config: UploadConfig,
     openapi: Option<OpenApiConfig>,
     session_backend: SessionBackendConfig,
 }
@@ -3686,6 +3839,23 @@ impl Default for SessionConfig {
 }
 
 #[derive(Clone)]
+struct UploadConfig {
+    max_body_bytes: usize,
+    max_file_bytes: usize,
+    allowed_mime_types: Option<HashSet<String>>,
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: 10 * 1024 * 1024, // 10 MiB
+            max_file_bytes: 5 * 1024 * 1024,  // 5 MiB
+            allowed_mime_types: None,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct OpenApiConfig {
     title: String,
     version: String,
@@ -3699,6 +3869,7 @@ impl Default for AppState {
             static_mounts: Vec::new(),
             sessions: HashMap::new(),
             session_config: SessionConfig::default(),
+            upload_config: UploadConfig::default(),
             openapi: None,
             session_backend: SessionBackendConfig::Memory,
         }
@@ -3791,6 +3962,16 @@ impl WebAppHandle {
         st.session_config.clone()
     }
 
+    fn set_upload_config(&self, cfg: UploadConfig) {
+        let mut st = self.inner.lock().unwrap();
+        st.upload_config = cfg;
+    }
+
+    fn upload_config(&self) -> UploadConfig {
+        let st = self.inner.lock().unwrap();
+        st.upload_config.clone()
+    }
+
     fn set_openapi(&self, cfg: OpenApiConfig) {
         let mut st = self.inner.lock().unwrap();
         st.openapi = Some(cfg);
@@ -3868,7 +4049,7 @@ struct RequestParts {
     path_params: HashMap<String, String>,
     query: HashMap<String, String>,
     json: Option<J>,
-    form: HashMap<String, String>,
+    form: HashMap<String, Value>,
     headers: HashMap<String, String>,
     cookies: HashMap<String, String>,
     session_id: Option<String>,
@@ -4024,7 +4205,25 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                     .cloned()
                     .filter(|v| !v.trim().is_empty())
                     .unwrap_or_else(new_request_id);
-                let (json_body, form_body) = parse_request_body(&headers, &body);
+                let upload_config = app_handle.upload_config();
+                let (json_body, form_body) =
+                    match parse_request_body(&headers, body, &upload_config).await {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        let error = error_response(
+                            400,
+                            "bad_request",
+                            &e.to_string(),
+                            None,
+                            Some(request_id),
+                        );
+                        return Ok::<_, (StatusCode, String)>(
+                            value_to_axum_response(Value::Response(error))
+                                .await
+                                .into_response(),
+                        );
+                    }
+                };
 
                 let req = RequestParts {
                     method: method.to_string(),
@@ -4147,30 +4346,149 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
     Ok(())
 }
 
-fn parse_request_body(headers: &HeaderMap, body: &[u8]) -> (Option<J>, HashMap<String, String>) {
-    if body.is_empty() {
-        return (None, HashMap::new());
+fn push_form_value(form: &mut HashMap<String, Value>, key: String, value: Value) {
+    use std::collections::hash_map::Entry;
+    match form.entry(key) {
+        Entry::Vacant(slot) => {
+            slot.insert(value);
+        }
+        Entry::Occupied(mut occ) => match occ.get_mut() {
+            Value::List(items) => items.push(value),
+            existing => {
+                let previous = existing.clone();
+                *existing = Value::List(vec![previous, value]);
+            }
+        },
+    }
+}
+
+fn build_uploaded_file_value(
+    filename: Option<String>,
+    content_type: Option<String>,
+    bytes: Vec<u8>,
+) -> Value {
+    let mut file = IndexMap::new();
+    file.insert(
+        "filename".into(),
+        filename.map(Value::Str).unwrap_or(Value::None),
+    );
+    file.insert(
+        "content_type".into(),
+        content_type.map(Value::Str).unwrap_or(Value::None),
+    );
+    file.insert("size".into(), Value::Int(bytes.len() as i64));
+    file.insert("bytes".into(), Value::Bytes(bytes));
+    Value::Dict(file)
+}
+
+async fn parse_multipart_form_data(
+    content_type: &str,
+    body: Bytes,
+    upload_config: &UploadConfig,
+) -> RResult<HashMap<String, Value>> {
+    let boundary = multer::parse_boundary(content_type)
+        .map_err(|e| RelayError::Type(format!("multipart/form-data boundary parse failed: {e}")))?;
+
+    let stream = futures::stream::once(async move { Ok::<Bytes, std::io::Error>(body) });
+    let mut multipart = multer::Multipart::new(stream, boundary);
+    let mut form = HashMap::new();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| RelayError::Type(format!("multipart/form-data parse failed: {e}")))?
+    {
+        let Some(name) = field.name().map(|s| s.to_string()) else {
+            continue;
+        };
+        let filename = field.file_name().map(|s| s.to_string());
+        let content_type = field.content_type().map(|s| s.to_string());
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| RelayError::Type(format!("multipart field read failed: {e}")))?;
+
+        let value = if filename.is_some() {
+            if bytes.len() > upload_config.max_file_bytes {
+                return Err(RelayError::Type(format!(
+                    "multipart file field '{name}' exceeds max_file_bytes={} (got {} bytes)",
+                    upload_config.max_file_bytes,
+                    bytes.len()
+                )));
+            }
+
+            if let Some(allowed) = &upload_config.allowed_mime_types {
+                let normalized = content_type
+                    .as_deref()
+                    .map(|v| v.trim().to_ascii_lowercase())
+                    .unwrap_or_default();
+                if normalized.is_empty() || !allowed.contains(&normalized) {
+                    return Err(RelayError::Type(format!(
+                        "multipart file field '{name}' content type '{}' is not allowed",
+                        if normalized.is_empty() {
+                            "<missing>"
+                        } else {
+                            normalized.as_str()
+                        }
+                    )));
+                }
+            }
+
+            build_uploaded_file_value(filename, content_type, bytes.to_vec())
+        } else {
+            Value::Str(String::from_utf8_lossy(&bytes).to_string())
+        };
+        push_form_value(&mut form, name, value);
     }
 
-    let ct = headers
+    Ok(form)
+}
+
+async fn parse_request_body(
+    headers: &HeaderMap,
+    body: Bytes,
+    upload_config: &UploadConfig,
+) -> RResult<(Option<J>, HashMap<String, Value>)> {
+    if body.is_empty() {
+        return Ok((None, HashMap::new()));
+    }
+
+    if body.len() > upload_config.max_body_bytes {
+        return Err(RelayError::Type(format!(
+            "request body exceeds max_body_bytes={} (got {} bytes)",
+            upload_config.max_body_bytes,
+            body.len()
+        )));
+    }
+
+    let ct_raw = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
-        .to_ascii_lowercase();
+        .to_string();
+    let ct = ct_raw.to_ascii_lowercase();
 
     if ct.contains("application/json") {
-        let json = serde_json::from_slice::<J>(body).ok();
-        return (json, HashMap::new());
+        if let Ok(json) = serde_json::from_slice::<J>(&body) {
+            return Ok((Some(json), HashMap::new()));
+        }
+        return Ok((None, HashMap::new()));
     }
 
     if ct.contains("application/x-www-form-urlencoded") {
-        let form = url::form_urlencoded::parse(body)
-            .into_owned()
-            .collect::<HashMap<String, String>>();
-        return (None, form);
+        let mut form = HashMap::new();
+        for (k, v) in url::form_urlencoded::parse(&body).into_owned() {
+            push_form_value(&mut form, k, Value::Str(v));
+        }
+        return Ok((None, form));
     }
 
-    (None, HashMap::new())
+    if ct.contains("multipart/form-data") {
+        let form = parse_multipart_form_data(&ct_raw, body, upload_config).await?;
+        return Ok((None, form));
+    }
+
+    Ok((None, HashMap::new()))
 }
 
 fn parse_cookie_header(raw: Option<String>) -> HashMap<String, String> {
@@ -4838,6 +5156,534 @@ impl HttpResponseHandle {
     }
 }
 
+// ========================= Email Client (SMTP) =========================
+
+type EmailSendFut = Pin<Box<dyn Future<Output = RResult<EmailSendMetadata>> + Send>>;
+type EmailSender = Arc<dyn Fn(MailMessage) -> EmailSendFut + Send + Sync>;
+
+#[derive(Clone, Copy)]
+enum EmailTlsMode {
+    StartTls,
+    Wrapper,
+    Insecure,
+}
+
+impl EmailTlsMode {
+    fn parse(raw: &str) -> RResult<Self> {
+        match raw.trim().to_lowercase().as_str() {
+            "" | "starttls" => Ok(Self::StartTls),
+            "wrapper" | "smtps" => Ok(Self::Wrapper),
+            "insecure" => Ok(Self::Insecure),
+            other => Err(RelayError::Type(format!(
+                "Email(..., tls=...) expects one of: starttls, wrapper, insecure (got '{other}')"
+            ))),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EmailConfig {
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+    default_from: Option<String>,
+    tls_mode: EmailTlsMode,
+}
+
+#[derive(Clone, Default)]
+struct EmailSendMetadata {
+    message_id: Option<String>,
+    smtp_code: Option<i64>,
+    smtp_message: Option<String>,
+}
+
+struct PreparedEmail {
+    message: MailMessage,
+    envelope_to: Vec<String>,
+    message_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct EmailAttachmentSpec {
+    filename: String,
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct EmailHandle {
+    config: EmailConfig,
+    sender: EmailSender,
+}
+
+fn parse_mailbox(raw: String, sig: &str, field: &str) -> RResult<Mailbox> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(RelayError::Type(format!("{sig} {field} cannot be empty")));
+    }
+    trimmed.parse::<Mailbox>().map_err(|e| {
+        RelayError::Type(format!(
+            "{sig} {field} has invalid mailbox '{trimmed}': {e}"
+        ))
+    })
+}
+
+fn parse_optional_mailbox(v: Option<Value>, sig: &str, field: &str) -> RResult<Option<Mailbox>> {
+    let Some(raw) = parse_optional_str_value(v, sig, field)? else {
+        return Ok(None);
+    };
+    Ok(Some(parse_mailbox(raw, sig, field)?))
+}
+
+fn parse_mailbox_list(v: Value, sig: &str, field: &str) -> RResult<Vec<Mailbox>> {
+    parse_string_list_value(v, sig, field)?
+        .into_iter()
+        .map(|raw| parse_mailbox(raw, sig, field))
+        .collect()
+}
+
+fn parse_template_locals(v: Option<Value>, sig: &str) -> RResult<HashMap<String, Value>> {
+    match v.unwrap_or(Value::None) {
+        Value::None => Ok(HashMap::new()),
+        Value::Dict(m) => Ok(m.into_iter().collect()),
+        Value::Json(J::Object(obj)) => Ok(obj
+            .iter()
+            .map(|(k, vv)| (k.clone(), json_to_value(vv)))
+            .collect()),
+        _ => Err(RelayError::Type(format!(
+            "{sig} data must be dict/json object"
+        ))),
+    }
+}
+
+fn parse_attachment_bytes(v: Value, sig: &str) -> RResult<Vec<u8>> {
+    match v {
+        Value::Bytes(b) => Ok(b),
+        Value::Str(s) => Ok(s.into_bytes()),
+        Value::Json(J::String(s)) => Ok(s.into_bytes()),
+        Value::List(values) => {
+            let mut out = Vec::with_capacity(values.len());
+            for item in values {
+                let n = match item {
+                    Value::Int(i) => i,
+                    Value::Float(f) => f as i64,
+                    _ => {
+                        return Err(RelayError::Type(format!(
+                            "{sig} attachments bytes list must contain ints"
+                        )))
+                    }
+                };
+                if !(0..=255).contains(&n) {
+                    return Err(RelayError::Type(format!(
+                        "{sig} attachments bytes list values must be in range 0..255"
+                    )));
+                }
+                out.push(n as u8);
+            }
+            Ok(out)
+        }
+        Value::Json(J::Array(values)) => parse_attachment_bytes(Value::List(
+            values.iter().map(json_to_value).collect(),
+        ), sig),
+        _ => Err(RelayError::Type(format!(
+            "{sig} attachment content must be bytes, str, or list[int]"
+        ))),
+    }
+}
+
+fn parse_email_attachment(v: Value, sig: &str) -> RResult<EmailAttachmentSpec> {
+    let mut map = expect_object_like(v, sig)?;
+    let filename = map
+        .remove("filename")
+        .ok_or_else(|| RelayError::Type(format!("{sig} attachment missing filename")))?;
+    let filename = expect_str_value(filename, sig, "attachment.filename")?;
+
+    let content_type = parse_optional_str_value(
+        map.remove("content_type"),
+        sig,
+        "attachment.content_type",
+    )?
+    .unwrap_or_else(|| "application/octet-stream".to_string());
+
+    let body_value = map
+        .remove("bytes")
+        .or_else(|| map.remove("content"))
+        .or_else(|| map.remove("data"))
+        .ok_or_else(|| {
+            RelayError::Type(format!(
+                "{sig} attachment requires bytes/content/data field"
+            ))
+        })?;
+    let bytes = parse_attachment_bytes(body_value, sig)?;
+
+    Ok(EmailAttachmentSpec {
+        filename,
+        content_type,
+        bytes,
+    })
+}
+
+fn parse_email_attachments(v: Option<Value>, sig: &str) -> RResult<Vec<EmailAttachmentSpec>> {
+    let Some(v) = v else {
+        return Ok(vec![]);
+    };
+    match v {
+        Value::None => Ok(vec![]),
+        Value::Dict(_) | Value::Json(J::Object(_)) => Ok(vec![parse_email_attachment(v, sig)?]),
+        Value::List(items) => items
+            .into_iter()
+            .map(|item| parse_email_attachment(item, sig))
+            .collect(),
+        Value::Json(J::Array(items)) => items
+            .iter()
+            .map(|item| parse_email_attachment(json_to_value(item), sig))
+            .collect(),
+        _ => Err(RelayError::Type(format!(
+            "{sig} attachments must be attachment dict or list[attachment]"
+        ))),
+    }
+}
+
+fn smtp_sender_for_config(config: &EmailConfig) -> EmailSender {
+    let host = config.host.clone();
+    let port = config.port;
+    let username = config.username.clone();
+    let password = config.password.clone();
+    let tls_mode = config.tls_mode;
+
+    Arc::new(move |message: MailMessage| {
+        let host = host.clone();
+        let username = username.clone();
+        let password = password.clone();
+        Box::pin(async move {
+            let mut builder = match tls_mode {
+                EmailTlsMode::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(
+                    host.as_str(),
+                )
+                .map_err(|e| RelayError::Runtime(format!("email transport setup failed: {e}")))?,
+                EmailTlsMode::Wrapper => AsyncSmtpTransport::<Tokio1Executor>::relay(
+                    host.as_str(),
+                )
+                .map_err(|e| RelayError::Runtime(format!("email transport setup failed: {e}")))?,
+                EmailTlsMode::Insecure => {
+                    AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host.as_str())
+                }
+            };
+            builder = builder.port(port);
+
+            if let (Some(user), Some(pass)) = (username, password) {
+                builder = builder.credentials(Credentials::new(user, pass));
+            }
+
+            let transport = builder.build();
+            let response = transport
+                .send(message)
+                .await
+                .map_err(|e| RelayError::Runtime(format!("email send failed: {e}")))?;
+
+            let smtp_code = response.code().to_string().parse::<i64>().ok();
+            let smtp_message_lines = response
+                .message()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>();
+            let smtp_message = if smtp_message_lines.is_empty() {
+                None
+            } else {
+                Some(smtp_message_lines.join("\n"))
+            };
+
+            Ok(EmailSendMetadata {
+                message_id: None,
+                smtp_code,
+                smtp_message,
+            })
+        })
+    })
+}
+
+impl EmailHandle {
+    fn new(config: EmailConfig) -> Self {
+        let sender = smtp_sender_for_config(&config);
+        Self { config, sender }
+    }
+
+    fn from_constructor_args(args: &[Value], kwargs: &[(String, Value)]) -> RResult<Self> {
+        let sig = "Email(host, port=587, username=None, password=None, from=None, tls=\"starttls\")";
+
+        let host = kwarg_or_arg(kwargs, args, "host", 0).ok_or_else(|| {
+            RelayError::Type(format!("{sig} missing host"))
+        })?;
+        let host = expect_str_value(host, sig, "host")?;
+
+        let port = kwarg_or_arg(kwargs, args, "port", 1).unwrap_or(Value::Int(587));
+        let port = parse_u16_value(port, sig, "port")?;
+
+        let username = parse_optional_str_value(kwarg_or_arg(kwargs, args, "username", 2), sig, "username")?;
+        let password = parse_optional_str_value(kwarg_or_arg(kwargs, args, "password", 3), sig, "password")?;
+        let default_from = parse_optional_str_value(kwarg_or_arg(kwargs, args, "from", 4), sig, "from")?;
+
+        let tls_raw = parse_optional_str_value(kwarg_or_arg(kwargs, args, "tls", 5), sig, "tls")?
+            .unwrap_or_else(|| "starttls".to_string());
+        let tls_mode = EmailTlsMode::parse(&tls_raw)?;
+
+        if username.is_some() ^ password.is_some() {
+            return Err(RelayError::Type(format!(
+                "{sig} username and password must both be provided or both omitted"
+            )));
+        }
+
+        Ok(Self::new(EmailConfig {
+            host,
+            port,
+            username,
+            password,
+            default_from,
+            tls_mode,
+        }))
+    }
+
+    #[cfg(test)]
+    fn with_sender_for_test(config: EmailConfig, sender: EmailSender) -> Self {
+        Self { config, sender }
+    }
+
+    fn prepare_send_request(&self, args: &[Value], kwargs: &[(String, Value)]) -> RResult<PreparedEmail> {
+        let sig = "email.send(to, subject, text=None, html=None, cc=None, bcc=None, reply_to=None, from=None, headers=None, attachments=None)";
+
+        let to_raw = kwarg_or_arg(kwargs, args, "to", 0)
+            .ok_or_else(|| RelayError::Type(format!("{sig} missing to")))?;
+        let to = parse_mailbox_list(to_raw, sig, "to")?;
+        if to.is_empty() {
+            return Err(RelayError::Type(format!("{sig} to cannot be empty")));
+        }
+
+        let subject = kwarg_or_arg(kwargs, args, "subject", 1)
+            .ok_or_else(|| RelayError::Type(format!("{sig} missing subject")))?;
+        let subject = expect_str_value(subject, sig, "subject")?;
+
+        let text = parse_optional_str_value(kwarg_or_arg(kwargs, args, "text", 2), sig, "text")?;
+        let html = parse_optional_str_value(kwarg_or_arg(kwargs, args, "html", 3), sig, "html")?;
+        if text.is_none() && html.is_none() {
+            return Err(RelayError::Type(format!(
+                "{sig} requires at least one body part: text or html"
+            )));
+        }
+
+        let cc = parse_mailbox_list(
+            kwarg_or_arg(kwargs, args, "cc", 4).unwrap_or(Value::None),
+            sig,
+            "cc",
+        )?;
+        let bcc = parse_mailbox_list(
+            kwarg_or_arg(kwargs, args, "bcc", 5).unwrap_or(Value::None),
+            sig,
+            "bcc",
+        )?;
+        let reply_to = parse_optional_mailbox(kwarg_or_arg(kwargs, args, "reply_to", 6), sig, "reply_to")?;
+
+        let from_override = parse_optional_str_value(kwarg_or_arg(kwargs, args, "from", 7), sig, "from")?;
+        let from = from_override
+            .or_else(|| self.config.default_from.clone())
+            .ok_or_else(|| {
+                RelayError::Type(format!(
+                    "{sig} requires from in Email(...) or send(...)"
+                ))
+            })?;
+        let from = parse_mailbox(from, sig, "from")?;
+
+        let headers = kwarg_or_arg(kwargs, args, "headers", 8)
+            .map(|v| parse_headers_value(v, sig))
+            .transpose()?
+            .unwrap_or_default();
+        let attachments = parse_email_attachments(kwarg_or_arg(kwargs, args, "attachments", 9), sig)?;
+
+        let mut builder = MailMessage::builder().from(from).subject(subject);
+        for mb in &to {
+            builder = builder.to(mb.clone());
+        }
+        for mb in &cc {
+            builder = builder.cc(mb.clone());
+        }
+        for mb in &bcc {
+            builder = builder.bcc(mb.clone());
+        }
+        if let Some(reply_to) = reply_to {
+            builder = builder.reply_to(reply_to);
+        }
+
+        for (name, value) in headers {
+            let header_name = mail_header::HeaderName::new_from_ascii(name.clone())
+                .map_err(|e| RelayError::Type(format!(
+                    "{sig} invalid header name '{name}': {e}"
+                )))?;
+            builder = builder.raw_header(mail_header::HeaderValue::new(header_name, value));
+        }
+
+        let message = if attachments.is_empty() {
+            match (text, html) {
+                (Some(text), Some(html)) => builder
+                    .multipart(
+                        MultiPart::alternative()
+                            .singlepart(SinglePart::plain(text))
+                            .singlepart(SinglePart::html(html)),
+                    )
+                    .map_err(|e| RelayError::Runtime(format!("email message build failed: {e}")))?,
+                (Some(text), None) => builder
+                    .singlepart(SinglePart::plain(text))
+                    .map_err(|e| RelayError::Runtime(format!("email message build failed: {e}")))?,
+                (None, Some(html)) => builder
+                    .singlepart(SinglePart::html(html))
+                    .map_err(|e| RelayError::Runtime(format!("email message build failed: {e}")))?,
+                (None, None) => {
+                    return Err(RelayError::Type(format!(
+                        "{sig} requires at least one body part: text or html"
+                    )))
+                }
+            }
+        } else {
+            let mut mixed = MultiPart::mixed().build();
+            mixed = match (text, html) {
+                (Some(text), Some(html)) => mixed.multipart(
+                    MultiPart::alternative()
+                        .singlepart(SinglePart::plain(text))
+                        .singlepart(SinglePart::html(html)),
+                ),
+                (Some(text), None) => mixed.singlepart(SinglePart::plain(text)),
+                (None, Some(html)) => mixed.singlepart(SinglePart::html(html)),
+                (None, None) => {
+                    return Err(RelayError::Type(format!(
+                        "{sig} requires at least one body part: text or html"
+                    )))
+                }
+            };
+
+            for attachment in attachments {
+                let content_type = mail_header::ContentType::parse(&attachment.content_type)
+                    .map_err(|e| {
+                        RelayError::Type(format!(
+                            "{sig} invalid attachment content_type '{}': {e}",
+                            attachment.content_type
+                        ))
+                    })?;
+                mixed = mixed.singlepart(
+                    MailAttachment::new(attachment.filename).body(attachment.bytes, content_type),
+                );
+            }
+
+            builder
+                .multipart(mixed)
+                .map_err(|e| RelayError::Runtime(format!("email message build failed: {e}")))?
+        };
+
+        let envelope_to = to
+            .iter()
+            .chain(cc.iter())
+            .chain(bcc.iter())
+            .map(|mb| mb.email.to_string())
+            .collect::<Vec<_>>();
+
+        Ok(PreparedEmail {
+            message,
+            envelope_to,
+            message_id: None,
+        })
+    }
+
+    fn get_member(&self, name: &str) -> Value {
+        match name {
+            "send" => {
+                let email = self.clone();
+                Value::Builtin(Arc::new(move |args, kwargs| {
+                    let email = email.clone();
+                    Box::pin(async move {
+                        let prepared = email.prepare_send_request(&args, &kwargs)?;
+                        let PreparedEmail {
+                            message,
+                            envelope_to,
+                            message_id,
+                        } = prepared;
+                        let sender = email.sender.clone();
+                        let host = email.config.host.clone();
+                        let port = email.config.port;
+
+                        let d = Deferred::new(Box::pin(async move {
+                            let metadata = sender(message).await?;
+                            let mut out = IndexMap::new();
+                            out.insert("ok".into(), Value::Bool(true));
+                            out.insert("transport".into(), Value::Str("smtp".into()));
+                            out.insert("host".into(), Value::Str(host));
+                            out.insert("port".into(), Value::Int(port as i64));
+                            out.insert(
+                                "message_id".into(),
+                                metadata
+                                    .message_id
+                                    .or(message_id)
+                                    .map(Value::Str)
+                                    .unwrap_or(Value::None),
+                            );
+                            out.insert(
+                                "envelope_to".into(),
+                                Value::List(envelope_to.into_iter().map(Value::Str).collect()),
+                            );
+                            out.insert(
+                                "smtp_code".into(),
+                                metadata
+                                    .smtp_code
+                                    .map(Value::Int)
+                                    .unwrap_or(Value::None),
+                            );
+                            out.insert(
+                                "smtp_message".into(),
+                                metadata
+                                    .smtp_message
+                                    .map(Value::Str)
+                                    .unwrap_or(Value::None),
+                            );
+                            Ok(Value::Dict(out))
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            "render" => {
+                Value::Builtin(Arc::new(move |args, kwargs| {
+                    Box::pin(async move {
+                        let sig = "email.render(template, data=None)";
+                        let template = kwarg_or_arg(&kwargs, &args, "template", 0)
+                            .ok_or_else(|| RelayError::Type(format!("{sig} missing template")))?;
+                        let template = expect_str_value(template, sig, "template")?;
+                        let data = parse_template_locals(kwarg_or_arg(&kwargs, &args, "data", 1), sig)?;
+                        let rendered = render_template(&template, &data)?;
+                        Ok(Value::Str(rendered))
+                    })
+                }))
+            }
+            "render_file" => {
+                Value::Builtin(Arc::new(move |args, kwargs| {
+                    Box::pin(async move {
+                        let sig = "email.render_file(path, data=None)";
+                        let path = kwarg_or_arg(&kwargs, &args, "path", 0)
+                            .ok_or_else(|| RelayError::Type(format!("{sig} missing path")))?;
+                        let path = expect_str_value(path, sig, "path")?;
+                        let data = parse_template_locals(kwarg_or_arg(&kwargs, &args, "data", 1), sig)?;
+
+                        let d = Deferred::new(Box::pin(async move {
+                            let template = tokio::fs::read_to_string(path)
+                                .await
+                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
+                            let rendered = render_template(&template, &data)?;
+                            Ok(Value::Str(rendered))
+                        }));
+                        Ok(Value::Deferred(Arc::new(d)))
+                    })
+                }))
+            }
+            _ => Value::None,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum AuthStoreBackend {
     Memory(Arc<tokio::sync::Mutex<HashMap<String, String>>>),
@@ -5289,6 +6135,17 @@ impl Object {
                         }))
                     })
                 })),
+                "render_template" => Value::Builtin(Arc::new(move |args, kwargs| {
+                    Box::pin(async move {
+                        let sig = "app.render_template(template, data=None)";
+                        let template = kwarg_or_arg(&kwargs, &args, "template", 0)
+                            .ok_or_else(|| RelayError::Type(format!("{sig} missing template")))?;
+                        let template = expect_str_value(template, sig, "template")?;
+                        let data = parse_template_locals(kwarg_or_arg(&kwargs, &args, "data", 1), sig)?;
+                        let rendered = render_template(&template, &data)?;
+                        Ok(Value::Str(rendered))
+                    })
+                })),
                 "use" => {
                     let a = a.clone();
                     Value::Builtin(Arc::new(move |args, _| {
@@ -5376,6 +6233,60 @@ impl Object {
                             }
 
                             a.set_session_config(cfg);
+                            Ok(Value::None)
+                        })
+                    }))
+                }
+                "uploads" => {
+                    let a = a.clone();
+                    Value::Builtin(Arc::new(move |args, kwargs| {
+                        let a = a.clone();
+                        Box::pin(async move {
+                            let sig = "app.uploads(max_body_bytes=None, max_file_bytes=None, allowed_mime_types=None)";
+                            let mut cfg = a.upload_config();
+
+                            if let Some(v) = args.get(0) {
+                                if !matches!(v, Value::None) {
+                                    cfg.max_body_bytes =
+                                        parse_usize_value(v.clone(), sig, "max_body_bytes")?;
+                                }
+                            }
+                            if let Some(v) = args.get(1) {
+                                if !matches!(v, Value::None) {
+                                    cfg.max_file_bytes =
+                                        parse_usize_value(v.clone(), sig, "max_file_bytes")?;
+                                }
+                            }
+                            if let Some(v) = args.get(2) {
+                                cfg.allowed_mime_types = parse_optional_mime_allowlist(
+                                    Some(v.clone()),
+                                    sig,
+                                    "allowed_mime_types",
+                                )?;
+                            }
+
+                            for (k, v) in kwargs {
+                                match k.as_str() {
+                                    "max_body_bytes" => {
+                                        cfg.max_body_bytes =
+                                            parse_usize_value(v, sig, "max_body_bytes")?
+                                    }
+                                    "max_file_bytes" => {
+                                        cfg.max_file_bytes =
+                                            parse_usize_value(v, sig, "max_file_bytes")?
+                                    }
+                                    "allowed_mime_types" | "allowed_mimes" => {
+                                        cfg.allowed_mime_types = parse_optional_mime_allowlist(
+                                            Some(v),
+                                            sig,
+                                            "allowed_mime_types",
+                                        )?
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            a.set_upload_config(cfg);
                             Ok(Value::None)
                         })
                     }))
@@ -5522,6 +6433,7 @@ impl Object {
             },
             Object::Http(h) => h.get_member(name),
             Object::HttpResponse(r) => r.get_member(name),
+            Object::Email(e) => e.get_member(name),
             Object::AuthStore(a) => a.get_member(name),
             Object::MongoClient(m) => m.get_member(name),
             Object::MongoDatabase(d) => d.get_member(name),
@@ -5583,17 +6495,14 @@ impl Evaluator {
 
         let query_map = query.clone();
         let mut json_body = json.clone();
-        let form_body = form.clone();
         let headers_map = headers.clone();
 
         let mut query_values: IndexMap<String, Value> = query_map
             .iter()
             .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
             .collect();
-        let mut form_values: IndexMap<String, Value> = form
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::Str(v.clone())))
-            .collect();
+        let mut form_values: IndexMap<String, Value> =
+            form.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut json_values: Option<IndexMap<String, Value>> = json_body.as_ref().and_then(|j| {
             if let J::Object(obj) = j {
                 Some(
@@ -6102,22 +7011,200 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_urlencoded_form_request_body() {
+    #[tokio::test]
+    async fn parses_urlencoded_form_request_body() {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_TYPE,
             axum::http::HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
 
-        let (json, form) = parse_request_body(&headers, b"content=hello+world&tag=notes");
+        let upload_cfg = UploadConfig::default();
+        let (json, form) = parse_request_body(
+            &headers,
+            Bytes::from_static(b"content=hello+world&tag=notes"),
+            &upload_cfg,
+        )
+        .await
+        .expect("urlencoded parse should succeed");
         assert!(json.is_none());
-        assert_eq!(
-            form.get("content"),
-            Some(&"hello world".to_string()),
+        assert!(
+            matches!(form.get("content"), Some(Value::Str(s)) if s == "hello world"),
             "content should be URL-decoded"
         );
-        assert_eq!(form.get("tag"), Some(&"notes".to_string()));
+        assert!(matches!(form.get("tag"), Some(Value::Str(s)) if s == "notes"));
+    }
+
+    #[tokio::test]
+    async fn parses_multipart_form_request_body_with_file_uploads() {
+        let boundary = "relay-boundary";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_str(&format!(
+                "multipart/form-data; boundary={boundary}"
+            ))
+            .expect("header should be valid"),
+        );
+
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nUpload Test\r\n\
+--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n\
+--{boundary}--\r\n"
+        );
+
+        let upload_cfg = UploadConfig::default();
+        let (json, form) = parse_request_body(&headers, Bytes::from(body), &upload_cfg)
+            .await
+            .expect("multipart parse should succeed");
+        assert!(json.is_none());
+        assert!(matches!(
+            form.get("title"),
+            Some(Value::Str(s)) if s == "Upload Test"
+        ));
+
+        let file = form.get("file").expect("file field should exist");
+        match file {
+            Value::Dict(meta) => {
+                assert!(matches!(
+                    meta.get("filename"),
+                    Some(Value::Str(s)) if s == "hello.txt"
+                ));
+                assert!(matches!(
+                    meta.get("content_type"),
+                    Some(Value::Str(s)) if s == "text/plain"
+                ));
+                assert!(matches!(meta.get("size"), Some(Value::Int(11))));
+                assert!(matches!(
+                    meta.get("bytes"),
+                    Some(Value::Bytes(bytes)) if bytes == b"hello world"
+                ));
+            }
+            other => panic!("file field should be dict, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_body_limit_rejects_oversized_payloads() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        let upload_cfg = UploadConfig {
+            max_body_bytes: 4,
+            ..UploadConfig::default()
+        };
+
+        let err = parse_request_body(&headers, Bytes::from_static(b"{\"x\":1}"), &upload_cfg)
+            .await;
+        let err = match err {
+            Ok(_) => panic!("body larger than limit should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            RelayError::Type(msg) if msg.contains("max_body_bytes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn multipart_file_limit_rejects_oversized_file() {
+        let boundary = "relay-boundary-limit";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_str(&format!(
+                "multipart/form-data; boundary={boundary}"
+            ))
+            .expect("header should be valid"),
+        );
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
+        );
+        let upload_cfg = UploadConfig {
+            max_file_bytes: 5,
+            ..UploadConfig::default()
+        };
+
+        let err = parse_request_body(&headers, Bytes::from(body), &upload_cfg)
+            .await;
+        let err = match err {
+            Ok(_) => panic!("file larger than max_file_bytes should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            RelayError::Type(msg) if msg.contains("max_file_bytes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn multipart_mime_allowlist_rejects_disallowed_file_type() {
+        let boundary = "relay-boundary-mime";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_str(&format!(
+                "multipart/form-data; boundary={boundary}"
+            ))
+            .expect("header should be valid"),
+        );
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
+        );
+        let upload_cfg = UploadConfig {
+            allowed_mime_types: Some(HashSet::from(["image/png".to_string()])),
+            ..UploadConfig::default()
+        };
+
+        let err = parse_request_body(&headers, Bytes::from(body), &upload_cfg)
+            .await;
+        let err = match err {
+            Ok(_) => panic!("disallowed mime should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            RelayError::Type(msg) if msg.contains("not allowed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn webapp_uploads_method_updates_upload_config() {
+        let src = r#"app = WebApp()
+app.uploads(
+    max_body_bytes=2048,
+    max_file_bytes=512,
+    allowed_mime_types=["image/png", "application/pdf"]
+)
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let app = {
+            let env_lock = env.lock().await;
+            match env_lock.get("app").expect("app should exist") {
+                Value::Obj(Object::WebApp(app)) => app,
+                other => panic!("expected app to be WebApp, got {}", other.repr()),
+            }
+        };
+
+        let cfg = app.upload_config();
+        assert_eq!(cfg.max_body_bytes, 2048);
+        assert_eq!(cfg.max_file_bytes, 512);
+        let allowed = cfg.allowed_mime_types.expect("allowlist should be set");
+        assert!(allowed.contains("image/png"));
+        assert!(allowed.contains("application/pdf"));
     }
 
     #[tokio::test]
@@ -6193,7 +7280,7 @@ greet("ada")
         let mut query = HashMap::new();
         query.insert("content".to_string(), "from-query".to_string());
         let mut form = HashMap::new();
-        form.insert("content".to_string(), "from-form".to_string());
+        form.insert("content".to_string(), Value::Str("from-form".to_string()));
 
         let out = evaluator
             .call_web_handler(
@@ -6390,7 +7477,7 @@ fn from_query()
         }
 
         let mut form = HashMap::new();
-        form.insert("name".to_string(), "from-form-helper".to_string());
+        form.insert("name".to_string(), Value::Str("from-form-helper".to_string()));
         let out_form = evaluator
             .call_web_handler(
                 WebAppHandle::new(),
@@ -6452,6 +7539,95 @@ fn from_query()
             }
             other => panic!("expected response, got {}", other.repr()),
         }
+    }
+
+    #[tokio::test]
+    async fn web_handler_can_access_multipart_uploaded_file_metadata() {
+        let src = r#"fn upload(file)
+    return file["filename"] + ":" + str(file["size"])
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let boundary = "relay-boundary-upload";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_str(&format!(
+                "multipart/form-data; boundary={boundary}"
+            ))
+            .expect("header should be valid"),
+        );
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
+        );
+        let upload_cfg = UploadConfig::default();
+        let (_json, form) = parse_request_body(&headers, Bytes::from(body), &upload_cfg)
+            .await
+            .expect("multipart parse should succeed");
+
+        let out = evaluator
+            .call_web_handler(
+                WebAppHandle::new(),
+                "upload",
+                RequestParts {
+                    method: "POST".to_string(),
+                    path: "/upload".to_string(),
+                    request_id: "rid-upload".to_string(),
+                    route_validation: RouteValidation::default(),
+                    path_params: HashMap::new(),
+                    query: HashMap::new(),
+                    json: None,
+                    form,
+                    headers: HashMap::new(),
+                    cookies: HashMap::new(),
+                    session_id: None,
+                    websocket: None,
+                },
+            )
+            .await
+            .expect("handler should run");
+
+        match out {
+            Value::Response(resp) => {
+                let text = String::from_utf8(resp.body).expect("response body should be utf-8");
+                assert_eq!(text, "hello.txt:11");
+            }
+            other => panic!("expected response, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn webapp_render_template_method_renders_explicit_template() {
+        let src = r#"app = WebApp()
+rendered = app.render_template("Hello {{ name }}", {"name": "Ada"})
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let env_lock = env.lock().await;
+        assert!(matches!(
+            env_lock.get("rendered").expect("rendered should exist"),
+            Value::Str(s) if s == "Hello Ada"
+        ));
     }
 
     #[tokio::test]
@@ -7241,6 +8417,282 @@ fn get_user(user_id)
             }
             other => panic!("headers should be dict, got {}", other.repr()),
         }
+    }
+
+    #[test]
+    fn email_constructor_rejects_invalid_tls_mode() {
+        let err = match EmailHandle::from_constructor_args(
+            &[Value::Str("smtp.example.com".into())],
+            &[("tls".into(), Value::Str("bad-mode".into()))],
+        ) {
+            Ok(_) => panic!("invalid tls mode should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            RelayError::Type(msg) if msg.contains("expects one of")
+        ));
+    }
+
+    #[test]
+    fn email_client_exposes_send_and_template_methods() {
+        let email = EmailHandle::new(EmailConfig {
+            host: "smtp.example.com".into(),
+            port: 587,
+            username: None,
+            password: None,
+            default_from: Some("Relay <noreply@example.com>".into()),
+            tls_mode: EmailTlsMode::StartTls,
+        });
+
+        assert!(!matches!(email.get_member("send"), Value::None));
+        assert!(!matches!(email.get_member("render"), Value::None));
+        assert!(!matches!(email.get_member("render_file"), Value::None));
+    }
+
+    #[tokio::test]
+    async fn email_send_returns_deferred_and_metadata_with_mock_sender() {
+        let email = EmailHandle::with_sender_for_test(
+            EmailConfig {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: None,
+                password: None,
+                default_from: Some("Relay <noreply@example.com>".into()),
+                tls_mode: EmailTlsMode::StartTls,
+            },
+            Arc::new(|_msg| {
+                Box::pin(async move {
+                    Ok(EmailSendMetadata {
+                        message_id: Some("<msg-123@example.com>".into()),
+                        smtp_code: Some(250),
+                        smtp_message: Some("2.0.0 queued".into()),
+                    })
+                })
+            }),
+        );
+
+        let send_fn = match email.get_member("send") {
+            Value::Builtin(f) => f,
+            other => panic!("send should be builtin, got {}", other.repr()),
+        };
+
+        let out = send_fn(
+            vec![
+                Value::Str("ada@example.com".into()),
+                Value::Str("Welcome".into()),
+                Value::Str("Hello Ada".into()),
+            ],
+            vec![],
+        )
+        .await
+        .expect("send call should succeed");
+
+        let deferred = match out {
+            Value::Deferred(d) => d,
+            other => panic!("send should return Deferred, got {}", other.repr()),
+        };
+        let resolved = deferred.resolve().await.expect("deferred should resolve");
+
+        match resolved {
+            Value::Dict(map) => {
+                assert!(matches!(map.get("ok"), Some(Value::Bool(true))));
+                assert!(matches!(
+                    map.get("transport"),
+                    Some(Value::Str(s)) if s == "smtp"
+                ));
+                assert!(matches!(
+                    map.get("host"),
+                    Some(Value::Str(s)) if s == "smtp.example.com"
+                ));
+                assert!(matches!(map.get("port"), Some(Value::Int(587))));
+                assert!(matches!(
+                    map.get("message_id"),
+                    Some(Value::Str(s)) if s == "<msg-123@example.com>"
+                ));
+                assert!(matches!(map.get("smtp_code"), Some(Value::Int(250))));
+                assert!(matches!(
+                    map.get("smtp_message"),
+                    Some(Value::Str(s)) if s == "2.0.0 queued"
+                ));
+            }
+            other => panic!("resolved value should be dict, got {}", other.repr()),
+        }
+    }
+
+    #[tokio::test]
+    async fn email_send_supports_multipart_attachments() {
+        let captured = Arc::new(tokio::sync::Mutex::new(None::<String>));
+        let captured_for_sender = captured.clone();
+
+        let email = EmailHandle::with_sender_for_test(
+            EmailConfig {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: None,
+                password: None,
+                default_from: Some("Relay <noreply@example.com>".into()),
+                tls_mode: EmailTlsMode::StartTls,
+            },
+            Arc::new(move |msg| {
+                let captured = captured_for_sender.clone();
+                Box::pin(async move {
+                    let formatted = String::from_utf8_lossy(&msg.formatted()).to_string();
+                    *captured.lock().await = Some(formatted);
+                    Ok(EmailSendMetadata::default())
+                })
+            }),
+        );
+
+        let mut attachment = IndexMap::new();
+        attachment.insert("filename".into(), Value::Str("hello.txt".into()));
+        attachment.insert("content_type".into(), Value::Str("text/plain".into()));
+        attachment.insert("bytes".into(), Value::Bytes(b"hello world".to_vec()));
+
+        let send_fn = match email.get_member("send") {
+            Value::Builtin(f) => f,
+            other => panic!("send should be builtin, got {}", other.repr()),
+        };
+
+        let out = send_fn(
+            vec![
+                Value::Str("ada@example.com".into()),
+                Value::Str("Attachment test".into()),
+                Value::Str("See attachment".into()),
+            ],
+            vec![("attachments".into(), Value::List(vec![Value::Dict(attachment)]))],
+        )
+        .await
+        .expect("send should succeed");
+
+        let deferred = match out {
+            Value::Deferred(d) => d,
+            other => panic!("send should return Deferred, got {}", other.repr()),
+        };
+        let _ = deferred.resolve().await.expect("send deferred should resolve");
+
+        let formatted = captured
+            .lock()
+            .await
+            .clone()
+            .expect("formatted message should be captured");
+        assert!(
+            formatted.contains("multipart/mixed"),
+            "email with attachments should use multipart/mixed"
+        );
+        assert!(
+            formatted.contains("filename=\"hello.txt\""),
+            "attachment filename should be present in MIME headers"
+        );
+    }
+
+    #[tokio::test]
+    async fn email_send_requires_body_part() {
+        let email = EmailHandle::with_sender_for_test(
+            EmailConfig {
+                host: "smtp.example.com".into(),
+                port: 587,
+                username: None,
+                password: None,
+                default_from: Some("Relay <noreply@example.com>".into()),
+                tls_mode: EmailTlsMode::StartTls,
+            },
+            Arc::new(|_msg| Box::pin(async move { Ok(EmailSendMetadata::default()) })),
+        );
+
+        let send_fn = match email.get_member("send") {
+            Value::Builtin(f) => f,
+            other => panic!("send should be builtin, got {}", other.repr()),
+        };
+
+        let err = send_fn(
+            vec![
+                Value::Str("ada@example.com".into()),
+                Value::Str("No body".into()),
+            ],
+            vec![],
+        )
+        .await;
+        let err = match err {
+            Ok(_) => panic!("missing body should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            RelayError::Type(msg) if msg.contains("requires at least one body part")
+        ));
+    }
+
+    #[tokio::test]
+    async fn email_render_and_render_file_support_template_data() {
+        let email = EmailHandle::new(EmailConfig {
+            host: "smtp.example.com".into(),
+            port: 587,
+            username: None,
+            password: None,
+            default_from: Some("Relay <noreply@example.com>".into()),
+            tls_mode: EmailTlsMode::StartTls,
+        });
+
+        let mut data = IndexMap::new();
+        data.insert("name".into(), Value::Str("Ada".into()));
+
+        let render_fn = match email.get_member("render") {
+            Value::Builtin(f) => f,
+            other => panic!("render should be builtin, got {}", other.repr()),
+        };
+
+        let rendered_inline = render_fn(
+            vec![
+                Value::Str("Hello {{ name }}".into()),
+                Value::Dict(data.clone()),
+            ],
+            vec![],
+        )
+        .await
+        .expect("render should succeed");
+        assert!(matches!(
+            rendered_inline,
+            Value::Str(s) if s == "Hello Ada"
+        ));
+
+        let file_name = format!(
+            "relay-email-template-{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        );
+        let template_path = std::env::temp_dir().join(file_name);
+        tokio::fs::write(&template_path, "File says hi {{ name }}")
+            .await
+            .expect("template write should work");
+
+        let render_file_fn = match email.get_member("render_file") {
+            Value::Builtin(f) => f,
+            other => panic!("render_file should be builtin, got {}", other.repr()),
+        };
+        let rendered_file = render_file_fn(
+            vec![
+                Value::Str(template_path.to_string_lossy().to_string()),
+                Value::Dict(data),
+            ],
+            vec![],
+        )
+        .await
+        .expect("render_file call should succeed");
+        let rendered_file = match rendered_file {
+            Value::Deferred(d) => d.resolve().await.expect("render_file deferred should resolve"),
+            other => panic!("render_file should return Deferred, got {}", other.repr()),
+        };
+        assert!(matches!(
+            rendered_file,
+            Value::Str(s) if s == "File says hi Ada"
+        ));
+
+        let _ = tokio::fs::remove_file(template_path).await;
     }
 
     #[tokio::test]

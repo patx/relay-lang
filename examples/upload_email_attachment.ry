@@ -1,0 +1,39 @@
+app = WebApp()
+server = WebServer()
+app.uploads(
+    max_body_bytes=10 * 1024 * 1024,
+    max_file_bytes=5 * 1024 * 1024,
+    allowed_mime_types=["text/plain", "application/pdf"]
+)
+
+email = Email(
+    host="smtp.example.com",
+    username="smtp-user",
+    password="smtp-pass",
+    from="Relay <noreply@example.com>"
+)
+
+@app.get("/")
+fn upload_page()
+    return app.render_template(
+        "<h1>Upload</h1><form method=\"post\" enctype=\"multipart/form-data\" action=\"/upload\">\
+<input type=\"email\" name=\"to\" placeholder=\"you@example.com\" />\
+<input type=\"file\" name=\"file\" />\
+<button type=\"submit\">Send</button></form>",
+        {}
+    )
+
+@app.post("/upload")
+fn upload(to, file)
+    if (file == None)
+        return HTTPError(400, "missing_file", "file upload is required")
+
+    result = email.send(
+        to=to,
+        subject="Uploaded file",
+        text="Your uploaded file is attached.",
+        attachments=[file]
+    )
+    return {"ok": result["ok"], "smtp_code": result["smtp_code"]}
+
+server.run(app)
