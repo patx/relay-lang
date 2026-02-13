@@ -30,11 +30,11 @@ use axum::{
     Router,
 };
 
-use async_recursion::async_recursion;
 use argon2::{
-    password_hash::{SaltString, rand_core::OsRng},
+    password_hash::{rand_core::OsRng, SaltString},
     Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
 };
+use async_recursion::async_recursion;
 use futures::{stream::TryStreamExt, SinkExt, StreamExt};
 use indexmap::IndexMap;
 use lettre::{
@@ -103,6 +103,8 @@ enum Stmt {
         expr: Expr,
     },
     Return(Option<Expr>),
+    Break,
+    Continue,
 
     If {
         cond: Expr,
@@ -253,7 +255,7 @@ enum Tok {
     Colon,  // used in dict literals only
     Op(String),
 
-    Keyword(String), // fn if for while return try except import True False None str int float
+    Keyword(String), // fn if else for while return break continue try except import True False None str int float
 }
 
 #[derive(Debug, Clone)]
@@ -487,8 +489,8 @@ impl<'a> Lexer<'a> {
                         let id = self.read_ident();
                         let k = match id.as_str() {
                             "fn" | "if" | "else" | "for" | "while" | "return" | "try"
-                            | "except" | "import" | "True" | "False" | "None" | "str" | "int"
-                            | "float" => Tok::Keyword(id),
+                            | "except" | "import" | "break" | "continue" | "True" | "False"
+                            | "None" | "str" | "int" | "float" => Tok::Keyword(id),
                             _ => Tok::Ident(id),
                         };
                         out.push(self.wrap(k));
@@ -728,6 +730,12 @@ impl Parser {
         if self.peek_kw("return") {
             return self.parse_return();
         }
+        if self.peek_kw("break") {
+            return self.parse_break();
+        }
+        if self.peek_kw("continue") {
+            return self.parse_continue();
+        }
         if self.peek_kw("try") {
             return self.parse_try_except();
         }
@@ -746,8 +754,7 @@ impl Parser {
         }
 
         let target = self.parse_expr()?;
-        if self.peek_is(&Tok::Assign) || self.peek_is(&Tok::AugAdd) || self.peek_is(&Tok::AugSub)
-        {
+        if self.peek_is(&Tok::Assign) || self.peek_is(&Tok::AugAdd) || self.peek_is(&Tok::AugSub) {
             if !Self::is_assignment_target(&target) {
                 return Err(self.err_here("Invalid assignment target"));
             }
@@ -933,6 +940,22 @@ impl Parser {
             return Ok(Stmt::Return(None));
         }
         Ok(Stmt::Return(Some(self.parse_expr()?)))
+    }
+
+    fn parse_break(&mut self) -> RResult<Stmt> {
+        self.expect_kw("break")?;
+        if self.peek_is(&Tok::Newline) || self.peek_is(&Tok::Dedent) || self.eof() {
+            return Ok(Stmt::Break);
+        }
+        Err(self.err_here("break does not take a value"))
+    }
+
+    fn parse_continue(&mut self) -> RResult<Stmt> {
+        self.expect_kw("continue")?;
+        if self.peek_is(&Tok::Newline) || self.peek_is(&Tok::Dedent) || self.eof() {
+            return Ok(Stmt::Continue);
+        }
+        Err(self.err_here("continue does not take a value"))
     }
 
     fn parse_try_except(&mut self) -> RResult<Stmt> {
@@ -1604,6 +1627,8 @@ struct ModuleState {
 enum Flow {
     None,
     Return(Value),
+    Break,
+    Continue,
 }
 
 impl Evaluator {
@@ -1628,6 +1653,12 @@ impl Evaluator {
             match self.eval_stmt(s).await? {
                 Flow::None => {}
                 Flow::Return(v) => return Ok(v),
+                Flow::Break => {
+                    return Err(RelayError::Runtime("break used outside loop".into()));
+                }
+                Flow::Continue => {
+                    return Err(RelayError::Runtime("continue used outside loop".into()));
+                }
             }
             last = Value::None;
         }
@@ -1703,7 +1734,7 @@ impl Evaluator {
         for s in b {
             match self.eval_stmt(s).await? {
                 Flow::None => {}
-                r @ Flow::Return(_) => return Ok(r),
+                r => return Ok(r),
             }
         }
         Ok(Flow::None)
@@ -1719,6 +1750,12 @@ impl Evaluator {
                 match self.eval_stmt(s).await? {
                     Flow::None => {}
                     Flow::Return(v) => return Ok(v),
+                    Flow::Break => {
+                        return Err(RelayError::Runtime("break used outside loop".into()));
+                    }
+                    Flow::Continue => {
+                        return Err(RelayError::Runtime("continue used outside loop".into()));
+                    }
                 }
                 continue;
             }
@@ -1728,6 +1765,12 @@ impl Evaluator {
                 _ => match self.eval_stmt(s).await? {
                     Flow::None => return Ok(Value::None),
                     Flow::Return(v) => return Ok(v),
+                    Flow::Break => {
+                        return Err(RelayError::Runtime("break used outside loop".into()));
+                    }
+                    Flow::Continue => {
+                        return Err(RelayError::Runtime("continue used outside loop".into()));
+                    }
                 },
             }
         }
@@ -1809,6 +1852,8 @@ impl Evaluator {
                 };
                 Ok(Flow::Return(v))
             }
+            Stmt::Break => Ok(Flow::Break),
+            Stmt::Continue => Ok(Flow::Continue),
             Stmt::If {
                 cond,
                 then_block,
@@ -1840,8 +1885,11 @@ impl Evaluator {
                     let mut env = self.env.lock().await;
                     env.pop();
                     drop(env);
-                    if let Flow::Return(v) = r {
-                        return Ok(Flow::Return(v));
+                    match r {
+                        Flow::None => {}
+                        Flow::Continue => continue,
+                        Flow::Break => break,
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
                     }
                 }
                 Ok(Flow::None)
@@ -1859,8 +1907,11 @@ impl Evaluator {
                     let mut env = self.env.lock().await;
                     env.pop();
                     drop(env);
-                    if let Flow::Return(v) = r {
-                        return Ok(Flow::Return(v));
+                    match r {
+                        Flow::None => {}
+                        Flow::Continue => continue,
+                        Flow::Break => break,
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
                     }
                 }
                 Ok(Flow::None)
@@ -2669,8 +2720,8 @@ fn assign_member_value(object: Value, name: &str, value: Value) -> RResult<Value
 fn assign_index_value(container: Value, index: Value, value: Value) -> RResult<Value> {
     match (container, index) {
         (Value::List(mut values), Value::Int(i)) => {
-            let idx = usize::try_from(i)
-                .map_err(|_| RelayError::Runtime("Index out of range".into()))?;
+            let idx =
+                usize::try_from(i).map_err(|_| RelayError::Runtime("Index out of range".into()))?;
             let slot = values
                 .get_mut(idx)
                 .ok_or_else(|| RelayError::Runtime("Index out of range".into()))?;
@@ -2682,9 +2733,9 @@ fn assign_index_value(container: Value, index: Value, value: Value) -> RResult<V
             Ok(Value::Dict(map))
         }
         (Value::Json(mut j), Value::Str(key)) => {
-            let obj = j.as_object_mut().ok_or_else(|| {
-                RelayError::Type("JSON indexing expects object value".into())
-            })?;
+            let obj = j
+                .as_object_mut()
+                .ok_or_else(|| RelayError::Type("JSON indexing expects object value".into()))?;
             obj.insert(key, value_to_json(&value));
             Ok(Value::Json(j))
         }
@@ -2841,12 +2892,10 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
                 };
 
                 match request {
-                    Some(Value::Dict(req)) => {
-                        Ok(req
-                            .get("form")
-                            .cloned()
-                            .unwrap_or(Value::Dict(IndexMap::new())))
-                    }
+                    Some(Value::Dict(req)) => Ok(req
+                        .get("form")
+                        .cloned()
+                        .unwrap_or(Value::Dict(IndexMap::new()))),
                     _ => Ok(Value::Dict(IndexMap::new())),
                 }
             })
@@ -2865,12 +2914,10 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
                 };
 
                 match request {
-                    Some(Value::Dict(req)) => {
-                        Ok(req
-                            .get("query")
-                            .cloned()
-                            .unwrap_or(Value::Dict(IndexMap::new())))
-                    }
+                    Some(Value::Dict(req)) => Ok(req
+                        .get("query")
+                        .cloned()
+                        .unwrap_or(Value::Dict(IndexMap::new()))),
                     _ => Ok(Value::Dict(IndexMap::new())),
                 }
             })
@@ -3426,9 +3473,7 @@ fn install_stdlib(env: &mut Env, evaluator: Arc<Evaluator>) -> RResult<()> {
                     }
                 };
                 Ok(Value::Obj(Object::AuthStore(AuthStoreHandle::callback(
-                    evaluator,
-                    load_fn,
-                    save_fn,
+                    evaluator, load_fn, save_fn,
                 ))))
             })
         })),
@@ -3482,7 +3527,12 @@ fn expect_int(args: &[Value], i: usize, sig: &str) -> RResult<i64> {
     }
 }
 
-fn kwarg_or_arg(kwargs: &[(String, Value)], args: &[Value], name: &str, index: usize) -> Option<Value> {
+fn kwarg_or_arg(
+    kwargs: &[(String, Value)],
+    args: &[Value],
+    name: &str,
+    index: usize,
+) -> Option<Value> {
     kwargs
         .iter()
         .find(|(k, _)| k == name)
@@ -3516,7 +3566,9 @@ fn parse_u16_value(v: Value, sig: &str, field: &str) -> RResult<u16> {
         _ => return Err(RelayError::Type(format!("{sig} {field} must be int"))),
     };
     if !(0..=65535).contains(&n) {
-        return Err(RelayError::Type(format!("{sig} {field} must be in range 0..65535")));
+        return Err(RelayError::Type(format!(
+            "{sig} {field} must be in range 0..65535"
+        )));
     }
     Ok(n as u16)
 }
@@ -3572,9 +3624,11 @@ fn parse_optional_mime_allowlist(
                 Ok(Some(set))
             }
         }
-        Value::Json(J::Array(items)) => {
-            parse_optional_mime_allowlist(Some(Value::List(items.iter().map(json_to_value).collect())), sig, field)
-        }
+        Value::Json(J::Array(items)) => parse_optional_mime_allowlist(
+            Some(Value::List(items.iter().map(json_to_value).collect())),
+            sig,
+            field,
+        ),
         _ => Err(RelayError::Type(format!(
             "{sig} {field} must be str or list[str]"
         ))),
@@ -3594,7 +3648,9 @@ fn parse_string_list_value(v: Value, sig: &str, field: &str) -> RResult<Vec<Stri
             .iter()
             .map(|item| expect_str_value(json_to_value(item), sig, field))
             .collect(),
-        _ => Err(RelayError::Type(format!("{sig} {field} must be str or list[str]"))),
+        _ => Err(RelayError::Type(format!(
+            "{sig} {field} must be str or list[str]"
+        ))),
     }
 }
 
@@ -3657,9 +3713,8 @@ fn validate_data_with_schema(data: Value, schema: Value, sig: &str) -> RResult<V
 
         match (existing, expected_type, default) {
             (Some(v), Some(expected_ty), _) => {
-                let coerced = coerce_param_type(&expected_ty, v).map_err(|e| {
-                    RelayError::Type(format!("validate({field}): {e}"))
-                })?;
+                let coerced = coerce_param_type(&expected_ty, v)
+                    .map_err(|e| RelayError::Type(format!("validate({field}): {e}")))?;
                 input.insert(field, coerced);
             }
             (Some(_), None, Some(default)) => {
@@ -3937,13 +3992,7 @@ impl WebAppHandle {
     }
 
     // New spec: decorator attaches directly to the app: @app.get("/"), @app.post("/")
-    fn register(
-        &self,
-        method: String,
-        path: String,
-        fn_name: String,
-        validation: RouteValidation,
-    ) {
+    fn register(&self, method: String, path: String, fn_name: String, validation: RouteValidation) {
         let mut st = self.inner.lock().unwrap();
         st.routes.push(RouteSpec {
             method,
@@ -4027,13 +4076,7 @@ impl RouteHandle {
         }
     }
 
-    fn register(
-        &self,
-        method: String,
-        path: String,
-        fn_name: String,
-        validation: RouteValidation,
-    ) {
+    fn register(&self, method: String, path: String, fn_name: String, validation: RouteValidation) {
         let full_path = join_route_prefix(&self.prefix, &path);
         let mut st = self.app.inner.lock().unwrap();
         st.routes.push(RouteSpec {
@@ -4214,22 +4257,22 @@ async fn run_app(app: WebAppHandle) -> RResult<()> {
                 let upload_config = app_handle.upload_config();
                 let (json_body, form_body) =
                     match parse_request_body(&headers, body, &upload_config).await {
-                    Ok(parts) => parts,
-                    Err(e) => {
-                        let error = error_response(
-                            400,
-                            "bad_request",
-                            &e.to_string(),
-                            None,
-                            Some(request_id),
-                        );
-                        return Ok::<_, (StatusCode, String)>(
-                            value_to_axum_response(Value::Response(error))
-                                .await
-                                .into_response(),
-                        );
-                    }
-                };
+                        Ok(parts) => parts,
+                        Err(e) => {
+                            let error = error_response(
+                                400,
+                                "bad_request",
+                                &e.to_string(),
+                                None,
+                                Some(request_id),
+                            );
+                            return Ok::<_, (StatusCode, String)>(
+                                value_to_axum_response(Value::Response(error))
+                                    .await
+                                    .into_response(),
+                            );
+                        }
+                    };
 
                 let req = RequestParts {
                     method: method.to_string(),
@@ -4932,7 +4975,9 @@ fn parse_headers_value(v: Value, sig: &str) -> RResult<HashMap<String, String>> 
             }
             Ok(out)
         }
-        _ => Err(RelayError::Type(format!("{sig} headers must be dict/json object"))),
+        _ => Err(RelayError::Type(format!(
+            "{sig} headers must be dict/json object"
+        ))),
     }
 }
 
@@ -4966,7 +5011,11 @@ async fn execute_http_request(
         "PUT" => client.put(url),
         "PATCH" => client.patch(url),
         "DELETE" => client.delete(url),
-        _ => return Err(RelayError::Runtime(format!("Unsupported HTTP method: {method}"))),
+        _ => {
+            return Err(RelayError::Runtime(format!(
+                "Unsupported HTTP method: {method}"
+            )))
+        }
     };
 
     for (k, v) in headers {
@@ -5289,9 +5338,9 @@ fn parse_attachment_bytes(v: Value, sig: &str) -> RResult<Vec<u8>> {
             }
             Ok(out)
         }
-        Value::Json(J::Array(values)) => parse_attachment_bytes(Value::List(
-            values.iter().map(json_to_value).collect(),
-        ), sig),
+        Value::Json(J::Array(values)) => {
+            parse_attachment_bytes(Value::List(values.iter().map(json_to_value).collect()), sig)
+        }
         _ => Err(RelayError::Type(format!(
             "{sig} attachment content must be bytes, str, or list[int]"
         ))),
@@ -5305,12 +5354,9 @@ fn parse_email_attachment(v: Value, sig: &str) -> RResult<EmailAttachmentSpec> {
         .ok_or_else(|| RelayError::Type(format!("{sig} attachment missing filename")))?;
     let filename = expect_str_value(filename, sig, "attachment.filename")?;
 
-    let content_type = parse_optional_str_value(
-        map.remove("content_type"),
-        sig,
-        "attachment.content_type",
-    )?
-    .unwrap_or_else(|| "application/octet-stream".to_string());
+    let content_type =
+        parse_optional_str_value(map.remove("content_type"), sig, "attachment.content_type")?
+            .unwrap_or_else(|| "application/octet-stream".to_string());
 
     let body_value = map
         .remove("bytes")
@@ -5368,10 +5414,10 @@ fn smtp_sender_for_config(config: &EmailConfig) -> EmailSender {
                     host.as_str(),
                 )
                 .map_err(|e| RelayError::Runtime(format!("email transport setup failed: {e}")))?,
-                EmailTlsMode::Wrapper => AsyncSmtpTransport::<Tokio1Executor>::relay(
-                    host.as_str(),
-                )
-                .map_err(|e| RelayError::Runtime(format!("email transport setup failed: {e}")))?,
+                EmailTlsMode::Wrapper => AsyncSmtpTransport::<Tokio1Executor>::relay(host.as_str())
+                    .map_err(|e| {
+                        RelayError::Runtime(format!("email transport setup failed: {e}"))
+                    })?,
                 EmailTlsMode::Insecure => {
                     AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host.as_str())
                 }
@@ -5415,19 +5461,22 @@ impl EmailHandle {
     }
 
     fn from_constructor_args(args: &[Value], kwargs: &[(String, Value)]) -> RResult<Self> {
-        let sig = "Email(host, port=587, username=None, password=None, from=None, tls=\"starttls\")";
+        let sig =
+            "Email(host, port=587, username=None, password=None, from=None, tls=\"starttls\")";
 
-        let host = kwarg_or_arg(kwargs, args, "host", 0).ok_or_else(|| {
-            RelayError::Type(format!("{sig} missing host"))
-        })?;
+        let host = kwarg_or_arg(kwargs, args, "host", 0)
+            .ok_or_else(|| RelayError::Type(format!("{sig} missing host")))?;
         let host = expect_str_value(host, sig, "host")?;
 
         let port = kwarg_or_arg(kwargs, args, "port", 1).unwrap_or(Value::Int(587));
         let port = parse_u16_value(port, sig, "port")?;
 
-        let username = parse_optional_str_value(kwarg_or_arg(kwargs, args, "username", 2), sig, "username")?;
-        let password = parse_optional_str_value(kwarg_or_arg(kwargs, args, "password", 3), sig, "password")?;
-        let default_from = parse_optional_str_value(kwarg_or_arg(kwargs, args, "from", 4), sig, "from")?;
+        let username =
+            parse_optional_str_value(kwarg_or_arg(kwargs, args, "username", 2), sig, "username")?;
+        let password =
+            parse_optional_str_value(kwarg_or_arg(kwargs, args, "password", 3), sig, "password")?;
+        let default_from =
+            parse_optional_str_value(kwarg_or_arg(kwargs, args, "from", 4), sig, "from")?;
 
         let tls_raw = parse_optional_str_value(kwarg_or_arg(kwargs, args, "tls", 5), sig, "tls")?
             .unwrap_or_else(|| "starttls".to_string());
@@ -5454,7 +5503,11 @@ impl EmailHandle {
         Self { config, sender }
     }
 
-    fn prepare_send_request(&self, args: &[Value], kwargs: &[(String, Value)]) -> RResult<PreparedEmail> {
+    fn prepare_send_request(
+        &self,
+        args: &[Value],
+        kwargs: &[(String, Value)],
+    ) -> RResult<PreparedEmail> {
         let sig = "email.send(to, subject, text=None, html=None, cc=None, bcc=None, reply_to=None, from=None, headers=None, attachments=None)";
 
         let to_raw = kwarg_or_arg(kwargs, args, "to", 0)
@@ -5486,15 +5539,15 @@ impl EmailHandle {
             sig,
             "bcc",
         )?;
-        let reply_to = parse_optional_mailbox(kwarg_or_arg(kwargs, args, "reply_to", 6), sig, "reply_to")?;
+        let reply_to =
+            parse_optional_mailbox(kwarg_or_arg(kwargs, args, "reply_to", 6), sig, "reply_to")?;
 
-        let from_override = parse_optional_str_value(kwarg_or_arg(kwargs, args, "from", 7), sig, "from")?;
+        let from_override =
+            parse_optional_str_value(kwarg_or_arg(kwargs, args, "from", 7), sig, "from")?;
         let from = from_override
             .or_else(|| self.config.default_from.clone())
             .ok_or_else(|| {
-                RelayError::Type(format!(
-                    "{sig} requires from in Email(...) or send(...)"
-                ))
+                RelayError::Type(format!("{sig} requires from in Email(...) or send(...)"))
             })?;
         let from = parse_mailbox(from, sig, "from")?;
 
@@ -5502,7 +5555,8 @@ impl EmailHandle {
             .map(|v| parse_headers_value(v, sig))
             .transpose()?
             .unwrap_or_default();
-        let attachments = parse_email_attachments(kwarg_or_arg(kwargs, args, "attachments", 9), sig)?;
+        let attachments =
+            parse_email_attachments(kwarg_or_arg(kwargs, args, "attachments", 9), sig)?;
 
         let mut builder = MailMessage::builder().from(from).subject(subject);
         for mb in &to {
@@ -5519,10 +5573,10 @@ impl EmailHandle {
         }
 
         for (name, value) in headers {
-            let header_name = mail_header::HeaderName::new_from_ascii(name.clone())
-                .map_err(|e| RelayError::Type(format!(
-                    "{sig} invalid header name '{name}': {e}"
-                )))?;
+            let header_name =
+                mail_header::HeaderName::new_from_ascii(name.clone()).map_err(|e| {
+                    RelayError::Type(format!("{sig} invalid header name '{name}': {e}"))
+                })?;
             builder = builder.raw_header(mail_header::HeaderValue::new(header_name, value));
         }
 
@@ -5634,17 +5688,11 @@ impl EmailHandle {
                             );
                             out.insert(
                                 "smtp_code".into(),
-                                metadata
-                                    .smtp_code
-                                    .map(Value::Int)
-                                    .unwrap_or(Value::None),
+                                metadata.smtp_code.map(Value::Int).unwrap_or(Value::None),
                             );
                             out.insert(
                                 "smtp_message".into(),
-                                metadata
-                                    .smtp_message
-                                    .map(Value::Str)
-                                    .unwrap_or(Value::None),
+                                metadata.smtp_message.map(Value::Str).unwrap_or(Value::None),
                             );
                             Ok(Value::Dict(out))
                         }));
@@ -5652,39 +5700,35 @@ impl EmailHandle {
                     })
                 }))
             }
-            "render" => {
-                Value::Builtin(Arc::new(move |args, kwargs| {
-                    Box::pin(async move {
-                        let sig = "email.render(template, data=None)";
-                        let template = kwarg_or_arg(&kwargs, &args, "template", 0)
-                            .ok_or_else(|| RelayError::Type(format!("{sig} missing template")))?;
-                        let template = expect_str_value(template, sig, "template")?;
-                        let data = parse_template_locals(kwarg_or_arg(&kwargs, &args, "data", 1), sig)?;
+            "render" => Value::Builtin(Arc::new(move |args, kwargs| {
+                Box::pin(async move {
+                    let sig = "email.render(template, data=None)";
+                    let template = kwarg_or_arg(&kwargs, &args, "template", 0)
+                        .ok_or_else(|| RelayError::Type(format!("{sig} missing template")))?;
+                    let template = expect_str_value(template, sig, "template")?;
+                    let data = parse_template_locals(kwarg_or_arg(&kwargs, &args, "data", 1), sig)?;
+                    let rendered = render_template(&template, &data)?;
+                    Ok(Value::Str(rendered))
+                })
+            })),
+            "render_file" => Value::Builtin(Arc::new(move |args, kwargs| {
+                Box::pin(async move {
+                    let sig = "email.render_file(path, data=None)";
+                    let path = kwarg_or_arg(&kwargs, &args, "path", 0)
+                        .ok_or_else(|| RelayError::Type(format!("{sig} missing path")))?;
+                    let path = expect_str_value(path, sig, "path")?;
+                    let data = parse_template_locals(kwarg_or_arg(&kwargs, &args, "data", 1), sig)?;
+
+                    let d = Deferred::new(Box::pin(async move {
+                        let template = tokio::fs::read_to_string(path)
+                            .await
+                            .map_err(|e| RelayError::Runtime(e.to_string()))?;
                         let rendered = render_template(&template, &data)?;
                         Ok(Value::Str(rendered))
-                    })
-                }))
-            }
-            "render_file" => {
-                Value::Builtin(Arc::new(move |args, kwargs| {
-                    Box::pin(async move {
-                        let sig = "email.render_file(path, data=None)";
-                        let path = kwarg_or_arg(&kwargs, &args, "path", 0)
-                            .ok_or_else(|| RelayError::Type(format!("{sig} missing path")))?;
-                        let path = expect_str_value(path, sig, "path")?;
-                        let data = parse_template_locals(kwarg_or_arg(&kwargs, &args, "data", 1), sig)?;
-
-                        let d = Deferred::new(Box::pin(async move {
-                            let template = tokio::fs::read_to_string(path)
-                                .await
-                                .map_err(|e| RelayError::Runtime(e.to_string()))?;
-                            let rendered = render_template(&template, &data)?;
-                            Ok(Value::Str(rendered))
-                        }));
-                        Ok(Value::Deferred(Arc::new(d)))
-                    })
-                }))
-            }
+                    }));
+                    Ok(Value::Deferred(Arc::new(d)))
+                })
+            })),
             _ => Value::None,
         }
     }
@@ -5726,9 +5770,7 @@ impl AuthStoreHandle {
         match &self.backend {
             AuthStoreBackend::Memory(store) => Ok(store.lock().await.get(&username).cloned()),
             AuthStoreBackend::Callback {
-                load_fn,
-                evaluator,
-                ..
+                load_fn, evaluator, ..
             } => {
                 let out = evaluator
                     .call_named_function(load_fn, vec![Value::Str(username)])
@@ -5752,9 +5794,7 @@ impl AuthStoreHandle {
                 Ok(())
             }
             AuthStoreBackend::Callback {
-                save_fn,
-                evaluator,
-                ..
+                save_fn, evaluator, ..
             } => {
                 let _ = evaluator
                     .call_named_function(save_fn, vec![Value::Str(username), Value::Str(hash)])
@@ -5815,8 +5855,10 @@ impl AuthStoreHandle {
                 Value::Builtin(Arc::new(move |args, _| {
                     let store = store.clone();
                     Box::pin(async move {
-                        let username = expect_str(&args, 0, "auth_store.verify(username, password)")?;
-                        let password = expect_str(&args, 1, "auth_store.verify(username, password)")?;
+                        let username =
+                            expect_str(&args, 0, "auth_store.verify(username, password)")?;
+                        let password =
+                            expect_str(&args, 1, "auth_store.verify(username, password)")?;
                         let Some(hash) = store.load_hash(username).await? else {
                             return Ok(Value::Bool(false));
                         };
@@ -6318,42 +6360,32 @@ impl Object {
                     Value::Builtin(Arc::new(move |args, _| {
                         let a = a.clone();
                         Box::pin(async move {
-                            let load_fn = args
-                                .get(0)
-                                .cloned()
-                                .ok_or_else(|| {
-                                    RelayError::Type(
-                                        "app.session_backend(load_fn, save_fn) expects load_fn"
-                                            .into(),
-                                    )
-                                })?;
-                            let save_fn = args
-                                .get(1)
-                                .cloned()
-                                .ok_or_else(|| {
-                                    RelayError::Type(
-                                        "app.session_backend(load_fn, save_fn) expects save_fn"
-                                            .into(),
-                                    )
-                                })?;
-                            let load_fn = match load_fn {
-                                Value::Function(f) => f.name.clone(),
-                                _ => {
-                                    return Err(RelayError::Type(
+                            let load_fn = args.get(0).cloned().ok_or_else(|| {
+                                RelayError::Type(
+                                    "app.session_backend(load_fn, save_fn) expects load_fn".into(),
+                                )
+                            })?;
+                            let save_fn = args.get(1).cloned().ok_or_else(|| {
+                                RelayError::Type(
+                                    "app.session_backend(load_fn, save_fn) expects save_fn".into(),
+                                )
+                            })?;
+                            let load_fn =
+                                match load_fn {
+                                    Value::Function(f) => f.name.clone(),
+                                    _ => return Err(RelayError::Type(
                                         "app.session_backend(load_fn, save_fn) expects functions"
                                             .into(),
-                                    ))
-                                }
-                            };
-                            let save_fn = match save_fn {
-                                Value::Function(f) => f.name.clone(),
-                                _ => {
-                                    return Err(RelayError::Type(
+                                    )),
+                                };
+                            let save_fn =
+                                match save_fn {
+                                    Value::Function(f) => f.name.clone(),
+                                    _ => return Err(RelayError::Type(
                                         "app.session_backend(load_fn, save_fn) expects functions"
                                             .into(),
-                                    ))
-                                }
-                            };
+                                    )),
+                                };
 
                             a.set_session_backend(SessionBackendConfig::Callback {
                                 load_fn,
@@ -6575,11 +6607,14 @@ impl Evaluator {
             let Some(j) = json_body.clone() else {
                 return Ok(validation_error("Missing JSON body".to_string()));
             };
-            let validated =
-                match validate_data_with_schema(Value::Json(j), schema, "decorator json validate") {
-                    Ok(v) => v,
-                    Err(e) => return Ok(validation_error(e.to_string())),
-                };
+            let validated = match validate_data_with_schema(
+                Value::Json(j),
+                schema,
+                "decorator json validate",
+            ) {
+                Ok(v) => v,
+                Err(e) => return Ok(validation_error(e.to_string())),
+            };
             let map = expect_object_like(validated, "decorator json validate")?;
             json_body = Some(value_to_json(&Value::Dict(map.clone())));
             json_values = Some(map);
@@ -6587,14 +6622,11 @@ impl Evaluator {
 
         if let Some(schema) = route_validation.validate_schema {
             if let Some(j) = json_body.clone() {
-                let validated = match validate_data_with_schema(
-                    Value::Json(j),
-                    schema,
-                    "decorator validate",
-                ) {
-                    Ok(v) => v,
-                    Err(e) => return Ok(validation_error(e.to_string())),
-                };
+                let validated =
+                    match validate_data_with_schema(Value::Json(j), schema, "decorator validate") {
+                        Ok(v) => v,
+                        Err(e) => return Ok(validation_error(e.to_string())),
+                    };
                 let map = expect_object_like(validated, "decorator validate")?;
                 json_body = Some(value_to_json(&Value::Dict(map.clone())));
                 json_values = Some(map);
@@ -6680,10 +6712,7 @@ impl Evaluator {
         req_dict.insert("method".into(), Value::Str(method));
         req_dict.insert("path".into(), Value::Str(path));
         req_dict.insert("request_id".into(), Value::Str(request_id.clone()));
-        req_dict.insert(
-            "query".into(),
-            Value::Dict(query_values.clone()),
-        );
+        req_dict.insert("query".into(), Value::Dict(query_values.clone()));
         req_dict.insert(
             "headers".into(),
             Value::Dict(
@@ -6705,10 +6734,7 @@ impl Evaluator {
         if let Some(j) = json_body.clone() {
             req_dict.insert("json".into(), Value::Json(j));
         }
-        req_dict.insert(
-            "form".into(),
-            Value::Dict(form_values.clone()),
-        );
+        req_dict.insert("form".into(), Value::Dict(form_values.clone()));
 
         let existing_session = self.load_session_data(&app, &session_id).await?;
         let session_cfg = app.session_config();
@@ -6759,6 +6785,8 @@ impl Evaluator {
                 match evaluator.eval_block(&handler_fn.body).await? {
                     Flow::None => Ok(Value::None),
                     Flow::Return(v) => Ok(v),
+                    Flow::Break => Err(RelayError::Runtime("break used outside loop".into())),
+                    Flow::Continue => Err(RelayError::Runtime("continue used outside loop".into())),
                 }
             })
         });
@@ -6981,6 +7009,153 @@ mod tests {
     }
 
     #[test]
+    fn parses_break_and_continue_statements_in_loop_body() {
+        let src = r#"fn loop_control()
+    while (True)
+        continue
+        break
+"#;
+
+        let program = parse_src(src).expect("loop control statements should parse");
+        let Stmt::FuncDef { body, .. } = &program.stmts[0] else {
+            panic!("expected function definition");
+        };
+        let Stmt::While { body, .. } = &body[0] else {
+            panic!("expected while statement");
+        };
+        assert!(matches!(body[0], Stmt::Continue));
+        assert!(matches!(body[1], Stmt::Break));
+    }
+
+    #[tokio::test]
+    async fn while_loop_respects_break_and_continue() {
+        let src = r#"i = 0
+sum = 0
+while (i < 6)
+    i =+ 1
+    if (i == 2)
+        continue
+    if (i == 5)
+        break
+    sum =+ i
+"#;
+
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let env_lock = env.lock().await;
+        let i = env_lock.get("i").expect("i should exist");
+        let sum = env_lock.get("sum").expect("sum should exist");
+        assert!(matches!(i, Value::Int(5)));
+        assert!(matches!(sum, Value::Int(8)));
+    }
+
+    #[tokio::test]
+    async fn for_loop_respects_break_and_continue() {
+        let src = r#"sum = 0
+for (n in [1, 2, 3, 4, 5])
+    if (n == 2)
+        continue
+    if (n == 5)
+        break
+    sum =+ n
+"#;
+
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+        evaluator
+            .eval_program(&program)
+            .await
+            .expect("program should evaluate");
+
+        let env_lock = env.lock().await;
+        let sum = env_lock.get("sum").expect("sum should exist");
+        assert!(matches!(sum, Value::Int(8)));
+    }
+
+    #[tokio::test]
+    async fn break_outside_loop_raises_runtime_error() {
+        let program = parse_src("break\n").expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+
+        let err = evaluator.eval_program(&program).await;
+        let err = match err {
+            Ok(v) => panic!("break outside loop should fail, got {}", v.repr()),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            RelayError::Runtime(msg) if msg.contains("break used outside loop")
+        ));
+    }
+
+    #[tokio::test]
+    async fn continue_outside_loop_raises_runtime_error() {
+        let program = parse_src("continue\n").expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+
+        let err = evaluator.eval_program(&program).await;
+        let err = match err {
+            Ok(v) => panic!("continue outside loop should fail, got {}", v.repr()),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            RelayError::Runtime(msg) if msg.contains("continue used outside loop")
+        ));
+    }
+
+    #[tokio::test]
+    async fn break_inside_function_without_loop_raises_runtime_error() {
+        let src = r#"fn bad()
+    break
+
+bad()
+"#;
+        let program = parse_src(src).expect("program should parse");
+        let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
+        let evaluator = Arc::new(Evaluator::new(env.clone()));
+        {
+            let mut env_lock = env.lock().await;
+            install_stdlib(&mut env_lock, evaluator.clone()).expect("stdlib install should work");
+        }
+
+        let err = evaluator.eval_program(&program).await;
+        let err = match err {
+            Ok(v) => panic!("break outside loop should fail, got {}", v.repr()),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            RelayError::Runtime(msg) if msg.contains("break used outside loop")
+        ));
+    }
+
+    #[test]
     fn bson_object_id_is_exposed_as_plain_string() {
         let oid = ObjectId::parse_str("698d35e0ef97187ab267d11e").expect("valid object id");
         let json = bson_to_json(Bson::ObjectId(oid)).expect("conversion should succeed");
@@ -7063,10 +7238,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_str(&format!(
-                "multipart/form-data; boundary={boundary}"
-            ))
-            .expect("header should be valid"),
+            axum::http::HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
+                .expect("header should be valid"),
         );
 
         let body = format!(
@@ -7118,8 +7291,7 @@ mod tests {
             ..UploadConfig::default()
         };
 
-        let err = parse_request_body(&headers, Bytes::from_static(b"{\"x\":1}"), &upload_cfg)
-            .await;
+        let err = parse_request_body(&headers, Bytes::from_static(b"{\"x\":1}"), &upload_cfg).await;
         let err = match err {
             Ok(_) => panic!("body larger than limit should fail"),
             Err(err) => err,
@@ -7136,10 +7308,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_str(&format!(
-                "multipart/form-data; boundary={boundary}"
-            ))
-            .expect("header should be valid"),
+            axum::http::HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
+                .expect("header should be valid"),
         );
         let body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
@@ -7149,8 +7319,7 @@ mod tests {
             ..UploadConfig::default()
         };
 
-        let err = parse_request_body(&headers, Bytes::from(body), &upload_cfg)
-            .await;
+        let err = parse_request_body(&headers, Bytes::from(body), &upload_cfg).await;
         let err = match err {
             Ok(_) => panic!("file larger than max_file_bytes should fail"),
             Err(err) => err,
@@ -7167,10 +7336,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_str(&format!(
-                "multipart/form-data; boundary={boundary}"
-            ))
-            .expect("header should be valid"),
+            axum::http::HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
+                .expect("header should be valid"),
         );
         let body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
@@ -7180,8 +7347,7 @@ mod tests {
             ..UploadConfig::default()
         };
 
-        let err = parse_request_body(&headers, Bytes::from(body), &upload_cfg)
-            .await;
+        let err = parse_request_body(&headers, Bytes::from(body), &upload_cfg).await;
         let err = match err {
             Ok(_) => panic!("disallowed mime should fail"),
             Err(err) => err,
@@ -7499,7 +7665,10 @@ fn from_query()
         }
 
         let mut form = HashMap::new();
-        form.insert("name".to_string(), Value::Str("from-form-helper".to_string()));
+        form.insert(
+            "name".to_string(),
+            Value::Str("from-form-helper".to_string()),
+        );
         let out_form = evaluator
             .call_web_handler(
                 WebAppHandle::new(),
@@ -7584,10 +7753,8 @@ fn from_query()
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_str(&format!(
-                "multipart/form-data; boundary={boundary}"
-            ))
-            .expect("header should be valid"),
+            axum::http::HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
+                .expect("header should be valid"),
         );
         let body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
@@ -7715,7 +7882,10 @@ fn from_query()
                 );
                 let body = String::from_utf8(resp.body).expect("response body should be utf-8");
                 let parsed: J = serde_json::from_str(&body).expect("body should be json");
-                assert_eq!(parsed["error"]["code"], J::String("bad_request".to_string()));
+                assert_eq!(
+                    parsed["error"]["code"],
+                    J::String("bad_request".to_string())
+                );
                 assert_eq!(
                     parsed["error"]["message"],
                     J::String("Missing field".to_string())
@@ -7724,7 +7894,10 @@ fn from_query()
                     parsed["error"]["request_id"],
                     J::String("rid-test".to_string())
                 );
-                assert_eq!(parsed["error"]["details"]["field"], J::String("name".to_string()));
+                assert_eq!(
+                    parsed["error"]["details"]["field"],
+                    J::String("name".to_string())
+                );
             }
             other => panic!("expected response, got {}", other.repr()),
         }
@@ -8231,7 +8404,10 @@ custom_ok = custom.verify("bob", "pw2")
 
         let env_lock = env.lock().await;
         assert!(matches!(env_lock.get("ok").expect("ok"), Value::Bool(true)));
-        assert!(matches!(env_lock.get("bad").expect("bad"), Value::Bool(false)));
+        assert!(matches!(
+            env_lock.get("bad").expect("bad"),
+            Value::Bool(false)
+        ));
         assert!(matches!(
             env_lock.get("store_ok").expect("store_ok"),
             Value::Bool(true)
@@ -8411,7 +8587,10 @@ fn get_user(user_id)
         };
 
         let state = app.inner.lock().unwrap();
-        let route = state.routes.first().expect("one route should be registered");
+        let route = state
+            .routes
+            .first()
+            .expect("one route should be registered");
         assert_eq!(route.path, "/api/v1/users/<user_id>");
     }
 
@@ -8428,7 +8607,10 @@ fn get_user(user_id)
             "2026.1",
         );
 
-        assert_eq!(doc["info"]["title"], J::String("Relay Test API".to_string()));
+        assert_eq!(
+            doc["info"]["title"],
+            J::String("Relay Test API".to_string())
+        );
         assert_eq!(doc["info"]["version"], J::String("2026.1".to_string()));
         assert!(doc["paths"]["/users/{id}"]["get"].is_object());
     }
@@ -8598,7 +8780,10 @@ fn get_user(user_id)
                 Value::Str("Attachment test".into()),
                 Value::Str("See attachment".into()),
             ],
-            vec![("attachments".into(), Value::List(vec![Value::Dict(attachment)]))],
+            vec![(
+                "attachments".into(),
+                Value::List(vec![Value::Dict(attachment)]),
+            )],
         )
         .await
         .expect("send should succeed");
@@ -8607,7 +8792,10 @@ fn get_user(user_id)
             Value::Deferred(d) => d,
             other => panic!("send should return Deferred, got {}", other.repr()),
         };
-        let _ = deferred.resolve().await.expect("send deferred should resolve");
+        let _ = deferred
+            .resolve()
+            .await
+            .expect("send deferred should resolve");
 
         let formatted = captured
             .lock()
@@ -8721,7 +8909,10 @@ fn get_user(user_id)
         .await
         .expect("render_file call should succeed");
         let rendered_file = match rendered_file {
-            Value::Deferred(d) => d.resolve().await.expect("render_file deferred should resolve"),
+            Value::Deferred(d) => d
+                .resolve()
+                .await
+                .expect("render_file deferred should resolve"),
             other => panic!("render_file should return Deferred, got {}", other.repr()),
         };
         assert!(matches!(

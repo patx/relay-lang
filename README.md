@@ -106,13 +106,13 @@ relay examples/url_shortener.ry     # requires local MongoDB
 
 ### Hello World
 
-```relay
+```python
 print("Hello, Relay!")
 ```
 
 ### Async Hello World
 
-```relay
+```python
 sleep(2000, print("world"))
 print("hello")
 ```
@@ -127,7 +127,7 @@ Notice how "hello" prints immediately while "world" waits 2 seconds—all withou
 
 ### Simple Web Server
 
-```relay
+```python
 app = WebApp()
 server = WebServer()
 
@@ -206,7 +206,7 @@ If your goal is to learn Relay end-to-end, use this order:
 
 Relay uses **indentation-based syntax** with 4 spaces per indentation level. Tabs are not allowed.
 
-```relay
+```python
 fn example()
     x = 10
     if (x > 5)
@@ -221,7 +221,7 @@ fn example()
 - Function bodies, control flow blocks, and loops all require indentation
 - Comments start with `//` and continue to the end of the line
 
-```relay
+```python
 // This is a comment
 x = 42  // This is also a comment
 ```
@@ -230,7 +230,7 @@ x = 42  // This is also a comment
 
 Relay supports loading code from multiple `.ry` files with `import`:
 
-```relay
+```python
 import utils
 import web.routes
 import shared/helpers.ry
@@ -242,13 +242,15 @@ import shared/helpers.ry
 - Relative paths are resolved from the importing file's directory
 - A module is loaded only once per run (duplicate imports are ignored)
 
+The module filenames above are illustrative examples of resolution behavior.
+
 Imported modules execute in the same global scope, so functions and variables they define become directly available.
 
 ### Data Types
 
 #### Primitives
 
-```relay
+```python
 // Integers
 age = 25
 count = -10
@@ -272,7 +274,7 @@ result = None
 #### Collections
 
 **Lists:**
-```relay
+```python
 numbers = [1, 2, 3, 4, 5]
 mixed = [1, "two", 3.0, True]
 nested = [[1, 2], [3, 4]]
@@ -290,7 +292,7 @@ numbers[0] = 10
 ```
 
 **Dictionaries:**
-```relay
+```python
 user = {"name": "Ada", "age": 30, "active": True}
 
 // Access values
@@ -307,7 +309,7 @@ age = user["age"]       // 30
 
 Relay supports destructuring assignment for iterables such as lists, strings, and dictionaries (dictionary keys are unpacked):
 
-```relay
+```python
 a, b, c = [10, 20, 30]
 x, y = "hi"           // x = "h", y = "i"
 k1, k2 = {"a": 1, "b": 2}
@@ -319,20 +321,22 @@ The number of variables must match the number of unpacked values.
 
 #### If-Else
 
-```relay
+```python
 if (condition)
     // then block
     print("condition is true")
 ```
 
-```relay
+```python
 if (x > 0)
     print("positive")
+else
+    print("zero or negative")
 ```
 
 #### While Loops
 
-```relay
+```python
 i = 0
 while (i < 5)
     print(i)
@@ -340,7 +344,7 @@ while (i < 5)
 ```
 
 Augmented assignment operators are supported:
-```relay
+```python
 i = 0
 while (i < 5)
     print(i)
@@ -349,7 +353,7 @@ while (i < 5)
 
 #### For Loops
 
-```relay
+```python
 // Iterate over lists
 for (item in [1, 2, 3, 4, 5])
     print(item)
@@ -362,11 +366,24 @@ for (key in user)
 
 **Note:** For loops iterate over collection elements or dictionary keys.
 
+#### `break` and `continue`
+
+```python
+i = 0
+while (i < 6)
+    i =+ 1
+    if (i == 2)
+        continue
+    if (i == 5)
+        break
+    print(i)
+```
+
 #### Error Handling (`try/except`)
 
 Use `try/except` to catch runtime errors and continue execution:
 
-```relay
+```python
 try
     value = int("not-a-number")
     print(value)
@@ -376,7 +393,7 @@ except
 
 You can also bind the error message:
 
-```relay
+```python
 try
     result = missing_name + 1
 except(err)
@@ -387,7 +404,7 @@ except(err)
 
 #### Basic Functions
 
-```relay
+```python
 fn greet(name)
     return "Hello, " + name
 
@@ -397,7 +414,7 @@ print(message)  // Hello, World
 
 #### Default Parameters
 
-```relay
+```python
 fn greet(name: str = "World")
     return "Hello, " + name
 
@@ -409,7 +426,7 @@ print(greet("Relay"))   // Hello, Relay
 
 Relay supports runtime type checking for parameters:
 
-```relay
+```python
 fn add(a: int, b: int)
     return a + b
 
@@ -426,7 +443,7 @@ Type hints on regular functions are strict validation (no implicit coercion). Un
 - `bool`: Boolean
 - `json` or `Json`: JSON object
 
-```relay
+```python
 fn process_data(data: json)
     return data["key"]
 ```
@@ -435,7 +452,7 @@ fn process_data(data: json)
 
 Functions can return any value:
 
-```relay
+```python
 fn get_user()
     return {"name": "Ada", "id": 1}
 
@@ -455,7 +472,7 @@ Relay's async model is unique: **there is no `await` keyword**. Instead, async o
 
 When you call an async function without using its return value, it runs in the background:
 
-```relay
+```python
 sleep(1000, print("delayed"))
 print("immediate")
 ```
@@ -470,7 +487,7 @@ delayed
 
 When you assign the result of an async operation, you get a `Deferred` value. The operation starts immediately but doesn't block:
 
-```relay
+```python
 x = sleep(1000, 10)     // Returns immediately with Deferred<10>
 y = sleep(1000, 20)     // Returns immediately with Deferred<20>
 print(x + y)            // Waits for both, then prints 30
@@ -483,23 +500,23 @@ Both sleeps start at the same time, so this takes ~1 second, not 2.
 A `Deferred` value automatically resolves (waits for the async operation to complete) when:
 
 1. **Used in an expression:**
-```relay
+```python
 result = deferred_value + 10
 ```
 
 2. **Passed to a function:**
-```relay
+```python
 print(deferred_value)
 ```
 
 3. **Returned from a function:**
-```relay
+```python
 fn get_data()
     return http.get("https://api.example.com")
 ```
 
 4. **Used in a comparison:**
-```relay
+```python
 if (deferred_value > 10)
     print("greater than 10")
 ```
@@ -507,7 +524,7 @@ if (deferred_value > 10)
 #### Concurrency Primitives
 
 **`spawn(expr)`** - Run an expression in parallel:
-```relay
+```python
 fn work(n)
     sleep(500, n * 2)
 
@@ -518,24 +535,24 @@ result2 = task2.join()
 ```
 
 **`all(tasks)`** - Wait for all tasks to complete:
-```relay
+```python
 tasks = [spawn(work(1)), spawn(work(2)), spawn(work(3))]
 results = all(tasks)    // [2, 4, 6]
 ```
 
 **`race(tasks)`** - Wait for the first task to complete:
-```relay
+```python
 tasks = [spawn(sleep(1000, "slow")), spawn(sleep(100, "fast"))]
 winner = race(tasks)    // "fast"
 ```
 
 **`timeout(expr, ms)`** - Add a timeout to any operation:
-```relay
+```python
 result = timeout(http.get("https://slow-api.com"), 5000)
 ```
 
 **`cancel(task)`** - Cancel a running task:
-```relay
+```python
 task = spawn(long_operation())
 cancel(task)
 ```
@@ -549,7 +566,7 @@ cancel(task)
 #### `print(value, ...)`
 Print values to stdout. Multiple arguments are printed space-separated.
 
-```relay
+```python
 print("Hello")                  // Hello
 print("x =", 42)                // x = 42
 print("a", "b", "c")            // a b c
@@ -558,7 +575,7 @@ print("a", "b", "c")            // a b c
 #### `str(value)`
 Convert any value to a string.
 
-```relay
+```python
 str(123)        // "123"
 str(3.14)       // "3.14"
 str(True)       // "True"
@@ -568,7 +585,7 @@ str([1, 2, 3])  // "[1, 2, 3]"
 #### `int(value)`
 Convert a value to an integer.
 
-```relay
+```python
 int("42")       // 42
 int(3.9)        // 3
 int(True)       // 1
@@ -578,7 +595,7 @@ int("invalid")  // Runtime error
 #### `float(value)`
 Convert a value to a float.
 
-```relay
+```python
 float("3.14")   // 3.14
 float(42)       // 42.0
 float("2.5e3")  // 2500.0
@@ -591,7 +608,7 @@ float("2.5e3")  // 2500.0
 
 Sleep for the specified duration, then resolve to `value`.
 
-```relay
+```python
 sleep(1000, print("done"))          // Print after 1 second
 result = sleep(2000, 42)            // Wait 2s, result = 42
 ```
@@ -601,7 +618,7 @@ result = sleep(2000, 42)            // Wait 2s, result = 42
 
 Execute an expression in parallel. Returns a `Task` object.
 
-```relay
+```python
 task = spawn(expensive_computation())
 // Do other work...
 result = task.join()
@@ -615,7 +632,7 @@ result = task.join()
 
 Wait for all tasks to complete. Returns results in order.
 
-```relay
+```python
 tasks = [spawn(work(1)), spawn(work(2)), spawn(work(3))]
 results = all(tasks)  // Wait for all, returns [result1, result2, result3]
 ```
@@ -625,7 +642,7 @@ results = all(tasks)  // Wait for all, returns [result1, result2, result3]
 
 Wait for the first task to complete, return its result.
 
-```relay
+```python
 tasks = [
     spawn(http.get("https://api1.com")),
     spawn(http.get("https://api2.com"))
@@ -638,7 +655,7 @@ fastest = race(tasks)  // Returns whichever completes first
 
 Add a timeout to any async operation.
 
-```relay
+```python
 result = timeout(http.get("https://slow.com"), 5000)  // 5 second timeout
 ```
 
@@ -647,7 +664,7 @@ If the timeout is exceeded, a runtime error is raised.
 #### `cancel(task)`
 Cancel a running task.
 
-```relay
+```python
 task = spawn(long_running_operation())
 cancel(task)
 ```
@@ -659,7 +676,7 @@ cancel(task)
 
 Read a file's contents as a UTF-8 string.
 
-```relay
+```python
 content = read_file("data.txt")
 print(content)
 ```
@@ -669,7 +686,7 @@ print(content)
 
 Write a string to a file.
 
-```relay
+```python
 save_file("Hello, World!", "output.txt")
 ```
 
@@ -678,7 +695,7 @@ save_file("Hello, World!", "output.txt")
 
 Read and parse a JSON file.
 
-```relay
+```python
 data = read_json("config.json")
 print(data["api_key"])
 ```
@@ -688,7 +705,7 @@ print(data["api_key"])
 
 Serialize data to JSON and write to a file.
 
-```relay
+```python
 config = {"host": "localhost", "port": 8080}
 save_json(config, "config.json")
 ```
@@ -698,7 +715,7 @@ save_json(config, "config.json")
 #### `Http()`
 Create an HTTP client instance.
 
-```relay
+```python
 http = Http()
 ```
 
@@ -707,7 +724,7 @@ http = Http()
 
 Send a GET request.
 
-```relay
+```python
 http = Http()
 resp = http.get(
     "https://api.example.com/users",
@@ -725,7 +742,7 @@ print(resp.text)    // Response body as string
 
 Send requests with optional payloads and headers.
 
-```relay
+```python
 http = Http()
 payload = {"name": "Ada", "email": "ada@example.com"}
 resp = http.post(
@@ -744,7 +761,7 @@ HTTP responses have the following properties:
 - `resp.json()` - Parse response body as JSON
 - `resp.headers` - Response headers (dict)
 
-```relay
+```python
 http = Http()
 resp = http.get("https://api.github.com/users/octocat")
 
@@ -758,7 +775,7 @@ print(data["login"])                  // octocat
 #### `Email(host, port=587, username=None, password=None, from=None, tls="starttls")`
 Create an SMTP email client instance.
 
-```relay
+```python
 email = Email(
     "smtp.example.com",
     587,
@@ -784,7 +801,7 @@ Send an email asynchronously over SMTP.
 - `from` can be passed per-call or configured in `Email(...)`
 - `attachments` accepts a single attachment dict or list of attachment dicts
 
-```relay
+```python
 email = Email(
     host="smtp.example.com",
     username="smtp-user",
@@ -807,7 +824,7 @@ Attachment dict format:
 - `bytes` or `content` or `data` (required) - file payload (`bytes`, `str`, or `list[int]`)
 - `content_type` (optional) - MIME type (default: `application/octet-stream`)
 
-```relay
+```python
 result = email.send(
     to="ada@example.com",
     subject="Monthly report",
@@ -835,7 +852,7 @@ Send result fields:
 
 Render an email template string with MiniJinja variables.
 
-```relay
+```python
 body = email.render("Hi {{ name }}, welcome!", {"name": "Ada"})
 ```
 
@@ -844,7 +861,7 @@ body = email.render("Hi {{ name }}, welcome!", {"name": "Ada"})
 
 Load and render a template file asynchronously.
 
-```relay
+```python
 html = email.render_file("templates/welcome.html", {"name": "Ada"})
 email.send(to="ada@example.com", subject="Welcome", html=html)
 ```
@@ -854,7 +871,7 @@ email.send(to="ada@example.com", subject="Welcome", html=html)
 #### `WebApp()`
 Create a web application instance.
 
-```relay
+```python
 app = WebApp()
 ```
 
@@ -869,7 +886,7 @@ Define HTTP endpoints using decorators:
 - `@app.delete(path)`
 - `@app.ws(path)`
 
-```relay
+```python
 app = WebApp()
 
 @app.get("/")
@@ -887,7 +904,7 @@ Decorator schema options:
 - `body=...` - Validate/coerce form body
 - `json=...` - Validate/coerce JSON body
 
-```relay
+```python
 @app.get("/search", query={"limit": "int", "q?": "str"})
 fn search(limit, q = None)
     return {"limit": limit, "q": q}
@@ -901,7 +918,7 @@ fn create_user(name, age = None)
 
 Use grouped route prefixes to organize larger APIs:
 
-```relay
+```python
 app = WebApp()
 api = app.group("/api")
 v1 = api.group("/v1")
@@ -913,7 +930,7 @@ fn get_user(user_id)
 
 Enable generated OpenAPI docs:
 
-```relay
+```python
 app.openapi(title="Relay API", version="1.0.0")
 // Exposes GET /openapi.json
 ```
@@ -926,7 +943,7 @@ WebSocket handlers receive a `socket` object with:
 - `socket.send(value)` → sends text (or binary when `bytes`)
 - `socket.close()` → closes the connection
 
-```relay
+```python
 @app.ws("/chat")
 fn chat_room()
     while True
@@ -940,7 +957,7 @@ fn chat_room()
 
 Use `<name>` syntax to capture path segments:
 
-```relay
+```python
 @app.get("/users/<user_id>")
 fn get_user(user_id)
     return {"id": user_id, "name": "Ada"}
@@ -957,7 +974,7 @@ Handler parameters are automatically bound from:
 2. **Request body form fields** (`application/x-www-form-urlencoded`)
 3. **Query parameters** (lowest priority)
 
-```relay
+```python
 // GET /search?q=relay&limit=10
 @app.get("/search")
 fn search(q: str, limit: int = 20)
@@ -976,7 +993,7 @@ fn get_user(user_id)
 
 JSON bodies are available as the `data` parameter (default name) or by typing a handler param as `Json`.
 
-```relay
+```python
 // POST /events with JSON body {"type":"signup","user":"ada"}
 @app.post("/events")
 fn create_event(data: Json)
@@ -998,7 +1015,7 @@ If middleware returns a non-`None` value, Relay short-circuits and sends that re
 
 `next()` runs the remainder of the middleware chain and then the handler.
 
-```relay
+```python
 fn audit(ctx, next)
     print("before:", ctx["path"])
     result = next()
@@ -1010,7 +1027,7 @@ fn audit(ctx, next)
 
 Use type hints to enforce parameter types and enable automatic coercion:
 
-```relay
+```python
 @app.post("/calculate")
 fn calculate(a: int, b: int)
     return {"result": a + b}
@@ -1030,7 +1047,7 @@ fn calculate(a: int, b: int)
 
 Every handler has access to a `request` dictionary:
 
-```relay
+```python
 @app.get("/debug")
 fn debug_request()
     print(request["method"])    // GET
@@ -1069,7 +1086,7 @@ Use helpers when you want payload access without binding handler parameters:
 - `get_body()` - Parsed form fields as a dict (empty dict when unavailable)
 - `get_json()` - Parsed JSON body (or `None` when unavailable)
 
-```relay
+```python
 @app.get("/search")
 fn search()
     query = get_query()
@@ -1096,7 +1113,7 @@ Schema format:
 - `"field?": "type"` for optional fields
 - `"field": {"type": "int", "required": True, "default": 10}` for explicit rules
 
-```relay
+```python
 @app.get("/search")
 fn search()
     params = require_query({"limit": "int", "q?": "str"})
@@ -1107,7 +1124,7 @@ fn search()
 
 Access cookies via the `cookies` dict:
 
-```relay
+```python
 @app.get("/")
 fn index()
     user_id = cookies["user_id"]
@@ -1118,7 +1135,7 @@ fn index()
 
 Relay provides built-in session management with HttpOnly cookies:
 
-```relay
+```python
 @app.get("/login")
 fn login(username: str)
     session["user"] = username
@@ -1141,13 +1158,13 @@ fn profile()
 
 Customize cookie policy:
 
-```relay
+```python
 app.session(secure=True, http_only=True, same_site="Lax")
 ```
 
 Use a custom session backend (for any database/service):
 
-```relay
+```python
 session_db = {}
 
 fn load_session(sid)
@@ -1163,7 +1180,7 @@ app.session_backend(load_session, save_session)
 
 Configure upload safety controls per app:
 
-```relay
+```python
 app.uploads(
     max_body_bytes=10 * 1024 * 1024,   // default 10 MiB
     max_file_bytes=5 * 1024 * 1024,    // default 5 MiB per file field
@@ -1183,28 +1200,28 @@ When limits are exceeded or a MIME type is disallowed, Relay returns `400 bad_re
 Handlers can return various types:
 
 **JSON (automatic):**
-```relay
+```python
 @app.get("/api/user")
 fn get_user()
     return {"name": "Ada", "id": 123}  // Auto-serialized to JSON
 ```
 
 **Plain text:**
-```relay
+```python
 @app.get("/")
 fn index()
     return "Hello, World!"  // Content-Type: text/plain
 ```
 
 **HTML:**
-```relay
+```python
 @app.get("/")
 fn index()
     return "<h1>Welcome</h1>"  // Content-Type: text/html
 ```
 
 **Custom Response:**
-```relay
+```python
 @app.get("/custom")
 fn custom()
     return Response(
@@ -1215,7 +1232,7 @@ fn custom()
 ```
 
 **Redirect:**
-```relay
+```python
 @app.post("/old-path")
 fn old_endpoint()
     return app.redirect("/new-path")
@@ -1224,7 +1241,7 @@ fn old_endpoint()
 #### `Response(body, status=200, content_type=None)`
 Create a custom HTTP response.
 
-```relay
+```python
 @app.get("/xml")
 fn get_xml()
     xml = "<root><item>data</item></root>"
@@ -1240,7 +1257,7 @@ fn get_xml()
 Create a structured API error response.
 When called inside a handler, Relay also includes `request_id` in the error payload.
 
-```relay
+```python
 @app.post("/users")
 fn create_user(name)
     if (name == None)
@@ -1256,7 +1273,7 @@ fn create_user(name)
 #### `auth_verify_password(password, hash)`
 **Returns:** `bool`
 
-```relay
+```python
 hash = auth_hash_password("super-secret")
 is_valid = auth_verify_password("super-secret", hash)   // True
 ```
@@ -1273,7 +1290,7 @@ Available methods:
 - `store.get_hash(username)` - returns stored hash or `None`
 - `store.set_hash(username, hash)` - stores precomputed hash
 
-```relay
+```python
 store = AuthStore()
 store.register("ada", "pw")
 print(store.verify("ada", "pw"))  // True
@@ -1295,7 +1312,7 @@ print(custom.verify("bob", "pw2"))  // True
 
 Create a redirect response.
 
-```relay
+```python
 @app.post("/submit")
 fn submit(data)
     // Process data...
@@ -1308,7 +1325,7 @@ Relay uses **MiniJinja** (Rust implementation of Jinja2) for template interpolat
 
 Template strings are evaluated anywhere in the interpreter (not only in web handlers) when a string contains both `{{` and `}}`.
 
-```relay
+```python
 name = "Relay"
 version = "0.1"
 
@@ -1321,7 +1338,7 @@ print("Count: {{ items | length }}")
 
 Web handlers use the same engine:
 
-```relay
+```python
 @app.get("/")
 fn index()
     return "<h1>{{ name }} v{{ version }}</h1>"
@@ -1331,7 +1348,7 @@ Templates can reference values in the current scope and support MiniJinja expres
 
 Use `app.render_template(path, ...kwargs)` when you want explicit template rendering from a file without relying on implicit `{{ ... }}` string evaluation:
 
-```relay
+```python
 app = WebApp()
 html = app.render_template("templates/welcome.html", name="Ada", plan="Pro")
 ```
@@ -1339,14 +1356,14 @@ html = app.render_template("templates/welcome.html", name="Ada", plan="Pro")
 #### `WebServer()`
 Create a web server instance.
 
-```relay
+```python
 server = WebServer()
 ```
 
 #### `server.run(app)`
 Start the web server.
 
-```relay
+```python
 app = WebApp()
 server = WebServer()
 
@@ -1369,7 +1386,7 @@ server.run(app)  // Starts server on 127.0.0.1:8080
 #### `Mongo(connection_string)`
 Create a MongoDB client.
 
-```relay
+```python
 mongo = Mongo("mongodb://localhost:27017")
 ```
 
@@ -1379,7 +1396,7 @@ mongodb://[username:password@]host[:port][/database]
 ```
 
 Examples:
-```relay
+```python
 // Local MongoDB
 mongo = Mongo("mongodb://localhost:27017")
 
@@ -1395,7 +1412,7 @@ mongo = Mongo("mongodb://admin:password@localhost:27017")
 
 Access a database.
 
-```relay
+```python
 mongo = Mongo("mongodb://localhost:27017")
 db = mongo.db("my_app")
 ```
@@ -1405,7 +1422,7 @@ db = mongo.db("my_app")
 
 Access a collection.
 
-```relay
+```python
 users = db.collection("users")
 posts = db.collection("posts")
 ```
@@ -1415,7 +1432,7 @@ posts = db.collection("posts")
 
 Insert a single document.
 
-```relay
+```python
 users = db.collection("users")
 result = users.insert_one({"name": "Ada", "email": "ada@example.com"})
 print(result["inserted_id"])  // ObjectId as string
@@ -1426,7 +1443,7 @@ print(result["inserted_id"])  // ObjectId as string
 
 Insert multiple documents.
 
-```relay
+```python
 users = db.collection("users")
 docs = [
     {"name": "Ada", "email": "ada@example.com"},
@@ -1441,7 +1458,7 @@ print(result["inserted_ids"])  // Dict of index -> ObjectId string
 
 Find a single document matching the filter.
 
-```relay
+```python
 users = db.collection("users")
 user = users.find_one({"email": "ada@example.com"})
 if (user != None)
@@ -1449,7 +1466,7 @@ if (user != None)
 ```
 
 **Filter examples:**
-```relay
+```python
 // Exact match
 user = users.find_one({"name": "Ada"})
 
@@ -1465,7 +1482,7 @@ user = users.find_one({"_id": "507f1f77bcf86cd799439011"})
 
 Find all documents matching the filter.
 
-```relay
+```python
 users = db.collection("users")
 active_users = users.find({"active": True})
 for (user in active_users)
@@ -1473,7 +1490,7 @@ for (user in active_users)
 ```
 
 **Find all documents:**
-```relay
+```python
 all_users = users.find({})
 ```
 
@@ -1482,7 +1499,7 @@ all_users = users.find({})
 
 Update a single document.
 
-```relay
+```python
 users = db.collection("users")
 result = users.update_one(
     {"email": "ada@example.com"},
@@ -1492,7 +1509,7 @@ print(result["modified_count"])  // 1
 ```
 
 **Update operators:**
-```relay
+```python
 // Set fields
 users.update_one({"_id": id}, {"$set": {"status": "active"}})
 
@@ -1508,7 +1525,7 @@ users.update_one({"_id": id}, {"$unset": {"temp_field": ""}})
 
 Update multiple documents.
 
-```relay
+```python
 users = db.collection("users")
 result = users.update_many(
     {"active": False},
@@ -1522,7 +1539,7 @@ print(result["modified_count"])
 
 Delete a single document.
 
-```relay
+```python
 users = db.collection("users")
 result = users.delete_one({"email": "ada@example.com"})
 print(result["deleted_count"])  // 1 or 0
@@ -1533,7 +1550,7 @@ print(result["deleted_count"])  // 1 or 0
 
 Delete multiple documents.
 
-```relay
+```python
 users = db.collection("users")
 result = users.delete_many({"active": False})
 print(result["deleted_count"])  // Number of deleted documents
@@ -1545,7 +1562,7 @@ print(result["deleted_count"])  // Number of deleted documents
 
 ### 1. Hello World (Async)
 
-```relay
+```python
 sleep(2000, print("world"))
 print("hello")
 ```
@@ -1558,7 +1575,7 @@ world
 
 ### 2. Simple Web API
 
-```relay
+```python
 app = WebApp()
 server = WebServer()
 
@@ -1575,7 +1592,7 @@ server.run(app)
 
 ### 3. Pastebin Service
 
-```relay
+```python
 app = WebApp()
 server = WebServer()
 mongo = Mongo("mongodb://localhost:27017")
@@ -1620,7 +1637,7 @@ Template files used by this example:
 
 ### 4. Concurrent HTTP Requests
 
-```relay
+```python
 http = Http()
 
 fn fetch_user(user_id)
@@ -1641,7 +1658,7 @@ for (user in users)
 
 ### 5. File Processing Pipeline
 
-```relay
+```python
 fn process_file(filename)
     content = read_file(filename)
     lines = len(content.split("\n"))
@@ -1659,7 +1676,7 @@ print("Processing complete!")
 
 ### 6. Session-based Authentication
 
-```relay
+```python
 app = WebApp()
 server = WebServer()
 mongo = Mongo("mongodb://localhost:27017")
@@ -1697,7 +1714,7 @@ server.run(app)
 
 ### 7. REST API with MongoDB
 
-```relay
+```python
 app = WebApp()
 server = WebServer()
 mongo = Mongo("mongodb://localhost:27017")
@@ -1747,7 +1764,7 @@ server.run(app)
 
 ### 8. Timeout and Error Handling
 
-```relay
+```python
 http = Http()
 
 fn fetch_with_timeout(url)
@@ -1760,7 +1777,7 @@ print(result.text)
 
 ### 9. Race Condition Example
 
-```relay
+```python
 http = Http()
 
 // Fetch from multiple mirrors, use whichever responds first
@@ -1780,7 +1797,7 @@ print("Fastest mirror returned:", fastest.text)
 
 ### 10. Background Task Processing
 
-```relay
+```python
 fn process_item(item)
     sleep(1000, print("Processed: " + str(item)))
 
@@ -1796,7 +1813,7 @@ print("All tasks started, continuing...")
 
 ### 11. SMTP Welcome Email with Templates
 
-```relay
+```python
 email = Email(
     host="smtp.example.com",
     username="smtp-user",
@@ -1845,7 +1862,7 @@ Relay is built on:
 
 When you call an async function, Relay immediately starts the operation and returns a `Deferred` value:
 
-```relay
+```python
 // This starts the HTTP request immediately
 response = http.get("https://api.example.com")
 // response is Deferred<Response>
@@ -1862,26 +1879,26 @@ print(response.status)  // <-- Blocks here if not complete
 `Deferred` values automatically resolve when:
 
 1. **Used in operations:**
-```relay
+```python
 x = sleep(1000, 10)
 y = x + 5  // Waits for x to resolve
 ```
 
 2. **Passed to functions:**
-```relay
+```python
 result = sleep(1000, 42)
 print(result)  // Waits before printing
 ```
 
 3. **Used in control flow:**
-```relay
+```python
 data = http.get("https://api.example.com")
 if (data.status == 200)  // Waits before comparison
     print("Success")
 ```
 
 4. **Indexed:**
-```relay
+```python
 resp = http.get("https://api.example.com")
 json_data = resp.json()
 print(json_data["key"])  // Waits for json() before indexing
@@ -1891,7 +1908,7 @@ print(json_data["key"])  // Waits for json() before indexing
 
 Expression statements (expressions not assigned to variables) run without blocking:
 
-```relay
+```python
 // This starts the sleep but doesn't wait
 sleep(1000, print("delayed"))
 
@@ -1907,7 +1924,7 @@ print("immediate")
 
 Relay uses Tokio's work-stealing scheduler to run tasks concurrently:
 
-```relay
+```python
 // Start 3 HTTP requests concurrently
 task1 = spawn(http.get("https://api1.com"))
 task2 = spawn(http.get("https://api2.com"))
@@ -1945,7 +1962,7 @@ Every web request is also assigned a `request_id` and echoed as the `x-request-i
 
 MongoDB operations return `Deferred` values that resolve when the database operation completes:
 
-```relay
+```python
 // This starts the query immediately
 users = collection.find({"active": True})
 
@@ -1964,7 +1981,7 @@ for (user in users)  // <-- Blocks here
 ### 1. Leverage Concurrent Execution
 
 Instead of:
-```relay
+```python
 // Sequential (slow)
 result1 = http.get("https://api1.com")
 result2 = http.get("https://api2.com")
@@ -1972,7 +1989,7 @@ result3 = http.get("https://api3.com")
 ```
 
 Do:
-```relay
+```python
 // Concurrent (fast)
 tasks = [
     spawn(http.get("https://api1.com")),
@@ -1986,7 +2003,7 @@ results = all(tasks)
 
 Type hints provide automatic validation and coercion:
 
-```relay
+```python
 @app.post("/calculate")
 fn calculate(a: int, b: int, operation: str = "add")
     if (operation == "add")
@@ -1999,7 +2016,7 @@ fn calculate(a: int, b: int, operation: str = "add")
 
 Always check for `None` when querying databases or processing optional parameters:
 
-```relay
+```python
 @app.get("/users/<user_id>")
 fn get_user(user_id)
     user = users.find_one({"_id": user_id})
@@ -2012,7 +2029,7 @@ fn get_user(user_id)
 
 Don't try to maintain state in global variables. Use sessions:
 
-```relay
+```python
 // Bad
 current_user = None
 
@@ -2030,7 +2047,7 @@ fn login(username)
 
 Always add timeouts to external HTTP requests:
 
-```relay
+```python
 fn fetch_data(url)
     return timeout(http.get(url), 10000)  // 10 second timeout
 ```
@@ -2039,7 +2056,7 @@ fn fetch_data(url)
 
 Split handlers into logical groups:
 
-```relay
+```python
 app = WebApp()
 server = WebServer()
 
@@ -2073,7 +2090,7 @@ server.run(app)
 
 For cleaner counter increments:
 
-```relay
+```python
 // Instead of
 i = i + 1
 
@@ -2085,7 +2102,7 @@ i =+ 1
 
 Structure handlers with early returns for error cases:
 
-```relay
+```python
 @app.get("/posts/<post_id>")
 fn get_post(post_id)
     post = posts.find_one({"_id": post_id})
@@ -2110,7 +2127,7 @@ fn get_post(post_id)
 
 **Fix:** Ensure all indentation uses 4 spaces (not tabs, not 2 spaces).
 
-```relay
+```python
 // Wrong
 fn example()
   print("hello")  // 2 spaces
@@ -2132,7 +2149,7 @@ fn example()
 
 **Fix:** Use explicit type conversion:
 
-```relay
+```python
 // Wrong
 x = 10 + "5"
 
@@ -2146,7 +2163,7 @@ x = 10 + int("5")
 
 **Fix:** Ensure variables are assigned before use:
 
-```relay
+```python
 // Wrong
 print(x)
 x = 10
@@ -2162,7 +2179,7 @@ print(x)
 
 **Fix:** Check list length before accessing:
 
-```relay
+```python
 items = [1, 2, 3]
 if (len(items) > 5)
     print(items[5])
@@ -2171,7 +2188,7 @@ if (len(items) > 5)
 ### Debugging Tips
 
 1. **Use print statements:** Relay's simplest debugging tool
-```relay
+```python
 fn process_data(data)
     print("Processing:", data)  // Debug output
     result = transform(data)
@@ -2180,7 +2197,7 @@ fn process_data(data)
 ```
 
 2. **Check async resolution:** If something seems to hang, check if you're waiting for a `Deferred` value
-```relay
+```python
 // This might hang if the HTTP request never completes
 result = http.get("https://unreachable.com")
 print(result.status)
@@ -2194,7 +2211,7 @@ result = timeout(http.get("https://unreachable.com"), 5000)
 4. **Check file paths:** File operations use paths relative to where you run the `relay` command
 
 5. **Inspect request objects:** Log the request object to debug handler issues
-```relay
+```python
 @app.post("/debug")
 fn debug()
     print(request)
@@ -2204,7 +2221,7 @@ fn debug()
 ### Performance Tips
 
 1. **Batch database operations:** Use `insert_many` instead of multiple `insert_one` calls
-```relay
+```python
 // Slow
 for (item in items)
     collection.insert_one(item)
@@ -2214,7 +2231,7 @@ collection.insert_many(items)
 ```
 
 2. **Use `spawn` for I/O-heavy tasks:** Parallelize independent operations
-```relay
+```python
 // Serial: 5 seconds total
 sleep(1000, "a")
 sleep(1000, "b")
