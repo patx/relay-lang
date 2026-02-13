@@ -1293,11 +1293,11 @@ fn index()
 
 Templates can reference values in the current scope and support MiniJinja expressions/filters.
 
-Use `app.render_template(...)` when you want explicit template rendering without relying on implicit `{{ ... }}` string evaluation:
+Use `app.render_template(path, ...kwargs)` when you want explicit template rendering from a file without relying on implicit `{{ ... }}` string evaluation:
 
 ```relay
 app = WebApp()
-html = app.render_template("<h1>Hello {{ name }}</h1>", {"name": "Ada"})
+html = app.render_template("templates/welcome.html", name="Ada", plan="Pro")
 ```
 
 #### `WebServer()`

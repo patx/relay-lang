@@ -2069,6 +2069,10 @@ impl Evaluator {
                     &**callee,
                     Expr::Member { name, .. } if name == "render_template" || name == "render"
                 );
+                let is_app_render_template_method = matches!(
+                    &**callee,
+                    Expr::Member { name, .. } if name == "render_template"
+                );
 
                 let c = self
                     .resolve_deferred_only(self.eval_expr(callee).await?)
@@ -2102,7 +2106,9 @@ impl Evaluator {
                 // kwargs
                 let mut kw = Vec::new();
                 for (k, x) in kwargs {
-                    let v = if is_explicit_template_method && k == "template" {
+                    let v = if is_explicit_template_method
+                        && (k == "template" || (is_app_render_template_method && k == "path"))
+                    {
                         match x {
                             Expr::Str(s) => Value::Str(s.clone()),
                             _ => self.eval_expr(x).await?,
@@ -6137,11 +6143,27 @@ impl Object {
                 })),
                 "render_template" => Value::Builtin(Arc::new(move |args, kwargs| {
                     Box::pin(async move {
-                        let sig = "app.render_template(template, data=None)";
-                        let template = kwarg_or_arg(&kwargs, &args, "template", 0)
-                            .ok_or_else(|| RelayError::Type(format!("{sig} missing template")))?;
-                        let template = expect_str_value(template, sig, "template")?;
-                        let data = parse_template_locals(kwarg_or_arg(&kwargs, &args, "data", 1), sig)?;
+                        let sig = "app.render_template(path, ...kwargs)";
+                        let path = kwarg_or_arg(&kwargs, &args, "path", 0)
+                            .or_else(|| kwarg_or_arg(&kwargs, &args, "template", 0))
+                            .ok_or_else(|| RelayError::Type(format!("{sig} missing path")))?;
+                        let path = expect_str_value(path, sig, "path")?;
+
+                        let mut data = if args.len() >= 2 {
+                            parse_template_locals(args.get(1).cloned(), sig)?
+                        } else {
+                            HashMap::new()
+                        };
+                        for (k, v) in kwargs {
+                            if k == "path" || k == "template" {
+                                continue;
+                            }
+                            data.insert(k, v);
+                        }
+
+                        let template = tokio::fs::read_to_string(path)
+                            .await
+                            .map_err(|e| RelayError::Runtime(e.to_string()))?;
                         let rendered = render_template(&template, &data)?;
                         Ok(Value::Str(rendered))
                     })
@@ -7179,7 +7201,7 @@ app.uploads(
     allowed_mime_types=["image/png", "application/pdf"]
 )
 "#;
-        let program = parse_src(src).expect("program should parse");
+        let program = parse_src(&src).expect("program should parse");
         let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
         let evaluator = Arc::new(Evaluator::new(env.clone()));
         {
@@ -7214,7 +7236,7 @@ app.uploads(
 
 add("5", "10")
 "#;
-        let program = parse_src(src).expect("program should parse");
+        let program = parse_src(&src).expect("program should parse");
         let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
         let evaluator = Arc::new(Evaluator::new(env.clone()));
         {
@@ -7242,7 +7264,7 @@ add("5", "10")
 
 greet("ada")
 "#;
-        let program = parse_src(src).expect("program should parse");
+        let program = parse_src(&src).expect("program should parse");
         let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
         let evaluator = Arc::new(Evaluator::new(env.clone()));
         {
@@ -7608,10 +7630,23 @@ fn from_query()
 
     #[tokio::test]
     async fn webapp_render_template_method_renders_explicit_template() {
-        let src = r#"app = WebApp()
-rendered = app.render_template("Hello {{ name }}", {"name": "Ada"})
-"#;
-        let program = parse_src(src).expect("program should parse");
+        let file_name = format!(
+            "relay-webapp-template-{}.html",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        );
+        let template_path = std::env::temp_dir().join(file_name);
+        tokio::fs::write(&template_path, "<h1>Hello {{ name }}</h1>")
+            .await
+            .expect("template write should succeed");
+
+        let src = format!(
+            "app = WebApp()\nrendered = app.render_template(\"{}\", name=\"Ada\")\n",
+            template_path.to_string_lossy()
+        );
+        let program = parse_src(&src).expect("program should parse");
         let env = Arc::new(tokio::sync::Mutex::new(Env::new_global()));
         let evaluator = Arc::new(Evaluator::new(env.clone()));
         {
@@ -7626,8 +7661,10 @@ rendered = app.render_template("Hello {{ name }}", {"name": "Ada"})
         let env_lock = env.lock().await;
         assert!(matches!(
             env_lock.get("rendered").expect("rendered should exist"),
-            Value::Str(s) if s == "Hello Ada"
+            Value::Str(s) if s == "<h1>Hello Ada</h1>"
         ));
+
+        let _ = tokio::fs::remove_file(template_path).await;
     }
 
     #[tokio::test]

@@ -15,13 +15,7 @@ email = Email(
 
 @app.get("/")
 fn upload_page()
-    return app.render_template(
-        "<h1>Upload</h1><form method=\"post\" enctype=\"multipart/form-data\" action=\"/upload\">\
-<input type=\"email\" name=\"to\" placeholder=\"you@example.com\" />\
-<input type=\"file\" name=\"file\" />\
-<button type=\"submit\">Send</button></form>",
-        {}
-    )
+    return app.render_template("examples/templates/upload_form.html")
 
 @app.post("/upload")
 fn upload(to, file)
