@@ -1,0 +1,178 @@
+app = WebApp()
+server = WebServer()
+
+mongo = Mongo("mongodb://localhost:27017")
+db = mongo.db("shorty")
+urls = db.collection("urls")
+
+base_url = "http://127.0.0.1:8080"
+
+// Simple per-session abuse guard for write endpoints.
+fn rate_limit(ctx, next)
+    method = ctx["method"]
+    path = ctx["path"]
+    if (method == "POST" && (path == "/" || path == "/api/v1/shorten"))
+        count = session["shorten_count"]
+        if (count == None)
+            count = 0
+
+        if (count >= 50)
+            return HTTPError(429, "rate_limited", "Too many shorten requests in this session")
+
+        session["shorten_count"] = count + 1
+
+    return next()
+
+// CSRF protection for browser form posts; API route is exempt.
+fn csrf_protect(ctx, next)
+    method = ctx["method"]
+    path = ctx["path"]
+
+    if (method == "POST" && path == "/")
+        form = ctx["form"]
+        token = form["csrf_token"]
+        if (token == None || token != session["csrf_token"])
+            return HTTPError(403, "csrf_failed", "Invalid CSRF token")
+
+    return next()
+
+app.use(rate_limit)
+app.use(csrf_protect)
+
+fn is_http_url(url)
+    if (url == None)
+        return False
+
+    if (len(url) < 7)
+        return False
+
+    is_http = (
+        url[0] == "h" &&
+        url[1] == "t" &&
+        url[2] == "t" &&
+        url[3] == "p" &&
+        url[4] == ":" &&
+        url[5] == "/" &&
+        url[6] == "/"
+    )
+
+    if (is_http == True)
+        return True
+
+    if (len(url) < 8)
+        return False
+
+    return (
+        url[0] == "h" &&
+        url[1] == "t" &&
+        url[2] == "t" &&
+        url[3] == "p" &&
+        url[4] == "s" &&
+        url[5] == ":" &&
+        url[6] == "/" &&
+        url[7] == "/"
+    )
+
+@app.get("/")
+fn index()
+    if (session["csrf_token"] == None)
+        session["csrf_token"] = request["request_id"]
+
+    return app.render_template(
+        "examples/templates/url_shortener_index.html",
+        csrf_token=session["csrf_token"]
+    )
+
+@app.post("/")
+fn create_short(url = None)
+    if (is_http_url(url) == False)
+        return Response(
+            app.render_template("examples/templates/url_shortener_400.html"),
+            status=400,
+            content_type="text/html"
+        )
+
+    result = urls.insert_one({
+        "url": url,
+        "clicks": 0
+    })
+
+    short_id = str(result["inserted_id"])
+    short_url = base_url + "/" + short_id
+    stats_url = base_url + "/stats/" + short_id
+
+    return app.render_template(
+        "examples/templates/url_shortener_success.html",
+        short_url=short_url,
+        stats_url=stats_url,
+        url=url
+    )
+
+@app.get("/<short_id>")
+fn redirect_short(short_id)
+    doc = urls.find_one({"_id": short_id})
+    if (doc == None)
+        return Response(
+            app.render_template("examples/templates/url_shortener_404.html"),
+            status=404,
+            content_type="text/html"
+        )
+
+    urls.update_one({"_id": short_id}, {"$inc": {"clicks": 1}})
+    return app.redirect(doc["url"])
+
+@app.get("/stats/<short_id>")
+fn stats_page(short_id)
+    doc = urls.find_one({"_id": short_id})
+    if (doc == None)
+        return Response(
+            app.render_template("examples/templates/url_shortener_404.html"),
+            status=404,
+            content_type="text/html"
+        )
+
+    short_url = base_url + "/" + short_id
+    url = doc["url"]
+    clicks = doc["clicks"]
+
+    return app.render_template(
+        "examples/templates/url_shortener_stats.html",
+        short_url=short_url,
+        url=url,
+        clicks=clicks
+    )
+
+@app.post("/api/v1/shorten")
+fn api_shorten(url = None)
+    if (is_http_url(url) == False)
+        return HTTPError(400, "invalid_url", "URL must start with http:// or https://")
+
+    result = urls.insert_one({
+        "url": url,
+        "clicks": 0
+    })
+
+    short_id = str(result["inserted_id"])
+    return {
+        "status": "success",
+        "long_url": url,
+        "short_id": short_id,
+        "short_url": base_url + "/" + short_id,
+        "stats_url": base_url + "/api/v1/stats/" + short_id
+    }
+
+@app.get("/api/v1/stats/<short_id>")
+fn api_stats(short_id)
+    doc = urls.find_one({"_id": short_id})
+    if (doc == None)
+        return HTTPError(404, "not_found", "Short URL not found")
+
+    return {
+        "status": "success",
+        "short_id": short_id,
+        "short_url": base_url + "/" + short_id,
+        "long_url": doc["url"],
+        "clicks": doc["clicks"]
+    }
+
+server.run(app)
