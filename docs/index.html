@@ -7,96 +7,185 @@
   <meta name="description" content="Async-by-default programming language with Python-like syntax. No await. Built-in web server and HTTP client."/>
 
   <style>
-    :root { color-scheme: light dark; }
+    :root {
+      --bg: #0b0f1a;
+      --bg-soft: #111827;
+      --text: #e6f1ff;
+      --text-dim: #9fb3c8;
+      --accent: #00d4ff;
+      --accent-soft: rgba(0, 212, 255, 0.15);
+      --border: rgba(255,255,255,.08);
+    }
 
     body {
       margin: 0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(circle at 20% 0%, #0f1c2e 0%, #0b0f1a 60%);
+      color: var(--text);
       line-height: 1.6;
-      padding: 24px;
-      max-width: 880px;
+      padding: 32px 24px;
+      max-width: 920px;
       margin-inline: auto;
     }
 
-    header {
+    h1 {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding-bottom: 16px;
-      border-bottom: 1px solid rgba(127,127,127,.25);
-      margin-bottom: 32px;
+      justify-content: center;
+      gap: 2rem;
+
+      font-size: clamp(3rem, 12vw, 8rem);
+      line-height: 1;
+      margin: 0 0 12px;
+
+      background: linear-gradient(90deg, #ffffff, var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
     }
 
-    .logo { font-weight: 700; letter-spacing: .2px; }
-    .logo span { opacity: .6; }
+    .logo {
+      width: 1.5em;   /* slightly larger than text */
+      height: 1.1em;
+      filter: drop-shadow(0 0 30px rgba(0, 212, 255, 0.35));
+      transition: transform 0.3s ease;
+      flex: 0 0 auto;
+    }
 
-    h1 { font-size: clamp(2rem, 4vw, 3rem); margin: 0 0 8px; }
-    .tagline { margin: 0 0 20px; opacity: .75; }
+    .logo:hover {
+      transform: translateY(-4px) scale(1.03);
+    }
 
-    .buttons { display: flex; gap: 10px; flex-wrap: wrap; margin: 18px 0 44px; }
+    .tagline {
+      margin: 0 0 28px;
+      color: var(--text-dim);
+      text-align: center;
+    }
 
-    a.btn, button.btn {
+    .buttons {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin: 24px 0 60px;
+    }
+
+    a.btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      padding: 10px 14px;
-      border: 1px solid rgba(127,127,127,.35);
+      padding: 10px 16px;
       border-radius: 10px;
       text-decoration: none;
-      color: inherit;
-      background: transparent;
-      cursor: pointer;
+      font-weight: 500;
+      transition: all .2s ease;
     }
 
     a.btn.primary {
-      background: rgba(127,127,127,.12);
+      background: var(--accent);
+      color: #000;
+      box-shadow: 0 0 20px var(--accent-soft);
     }
 
-    section { margin: 48px 0; }
-    h2 { font-size: 1.3rem; margin: 0 0 14px; }
+    a.btn.primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 30px var(--accent);
+    }
+
+    a.btn.secondary {
+      border: 1px solid var(--border);
+      color: var(--text);
+      background: var(--bg-soft);
+    }
+
+    a.btn.secondary:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    section {
+      margin: 56px 0;
+    }
+
+    h2 {
+      font-size: 1.4rem;
+      margin: 0 0 16px;
+      color: var(--accent);
+    }
 
     pre {
       margin: 0;
-      padding: 14px;
-      border: 1px solid rgba(127,127,127,.25);
-      border-radius: 12px;
+      padding: 18px;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 14px;
       overflow-x: auto;
       font-size: .95rem;
     }
 
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
-    .note { margin-top: 10px; opacity: .75; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .note {
+      margin-top: 10px;
+      color: var(--text-dim);
+      font-size: .95rem;
+    }
 
     footer {
-      margin-top: 56px;
-      padding-top: 18px;
-      border-top: 1px solid rgba(127,127,127,.25);
-      opacity: .75;
-      font-size: .95rem;
+      margin-top: 72px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim);
+      font-size: .9rem;
+      text-align: center;
     }
   </style>
 </head>
 <body>
-
 <main>
-  <h1>Relay</h1>
+  <h1>
+    <svg class="logo" viewBox="0 0 220 180" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+      <defs>
+        <radialGradient id="glow" cx="50%" cy="40%" r="60%">
+          <stop offset="0%" stop-color="#00d4ff" stop-opacity="0.4"/>
+          <stop offset="100%" stop-color="#00d4ff" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+
+      <ellipse cx="110" cy="90" rx="95" ry="75" fill="url(#glow)"/>
+      <ellipse cx="110" cy="105" rx="70" ry="55" fill="#111827"/>
+      <circle cx="110" cy="85" r="48" fill="#0f172a"/>
+
+      <path d="M65 65 C40 40, 40 90, 75 75" fill="none" stroke="#00d4ff" stroke-width="8" stroke-linecap="round"/>
+      <path d="M155 65 C180 40, 180 90, 145 75" fill="none" stroke="#00d4ff" stroke-width="8" stroke-linecap="round"/>
+
+      <circle cx="95" cy="85" r="6" fill="#00d4ff"/>
+      <circle cx="125" cy="85" r="6" fill="#00d4ff"/>
+
+      <ellipse cx="110" cy="105" rx="18" ry="12" fill="#1f2937"/>
+      <circle cx="104" cy="105" r="2.5" fill="#00d4ff"/>
+      <circle cx="116" cy="105" r="2.5" fill="#00d4ff"/>
+    </svg>
+  </h1>
+  <h1>
+    Relay
+  </h1>
+
   <p class="tagline">
-    Async by default — no await keyword<br>
-    Python-like syntax • Built-in web server & HTTP client
+    A networking-first, async-by-default programming language with Python-like syntax and Node.js-style non-blocking semantics.
   </p>
 
   <div class="buttons">
     <a class="btn primary" href="https://github.com/patx/relay-lang">GitHub</a>
-    <a class="btn" href="https://github.com/patx/relay-lang#quick-start">Quick Start</a>
+    <a class="btn secondary" href="https://github.com/patx/relay-lang#quick-start">Quick Start</a>
   </div>
 
   <section>
     <h2>Async without await</h2>
     <pre><code>sleep(2000, print("world"))
 print("hello")</code></pre>
-    <p class="note">→ prints "hello" right away, "world" after 2 seconds</p>
+    <p class="note">→ prints "hello" immediately, "world" after 2 seconds, no <code>await</code> keywords ever</p>
   </section>
 
   <section>
@@ -113,7 +202,7 @@ server.run(app)</code></pre>
 
   <section>
     <h2>Get Started</h2>
-        <p class="note">→ Requires Rust</p>
+    <p class="note">→ Requires Rust</p>
     <pre><code>git clone https://github.com/patx/relay-lang
 cd relay-lang
 cargo install --path .
@@ -123,8 +212,8 @@ relay examples/type_hint_validation.ry</code></pre>
 </main>
 
 <footer>
-  Relay • MIT license • v0.1 • Made with Rust
+  🦬 Relay • MIT license • v0.1 • Built on Rust + Tokio
 </footer>
-
 </body>
 </html>
+
